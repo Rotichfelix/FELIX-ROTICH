@@ -1,0 +1,35 @@
+{
+  "entities": {
+    "user_db_state": {
+      "title": "User Database State",
+      "description": "The unified system state containing classroom members, sessions, and historic attendance registers",
+      "type": "object",
+      "properties": {
+        "participants": {
+          "type": "array",
+          "description": "List of participants in the database"
+        },
+        "sessions": {
+          "type": "array",
+          "description": "Chronological history of program tracking sessions"
+        },
+        "attendance": {
+          "type": "object",
+          "description": "Nested records of student attendance statuses mapped by participantId and date"
+        },
+        "lastUpdated": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The server-synced timestamp of the latest change"
+        }
+      },
+      "required": ["participants", "sessions", "attendance", "lastUpdated"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/data/metrics": {
+      "schema": "user_db_state",
+      "description": "Personal secure cloud space holding synchronized attendance metrics, participants database, and session dates"
+    }
+  }
+}

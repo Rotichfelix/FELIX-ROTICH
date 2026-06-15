@@ -1,0 +1,43 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidUserDbState(data) {
+      return data.keys().hasAll(['participants', 'sessions', 'attendance', 'lastUpdated'])
+        && data.keys().size() == 4
+        && data.participants is list
+        && data.sessions is list
+        && data.attendance is map
+        && data.lastUpdated is string
+        && data.lastUpdated.size() <= 128;
+    }
+
+    // Secure user-specific sub-paths for participants state cache syncing
+    match /users/{userId}/data/metrics {
+      allow read: if isOwner(userId) && isValidId(userId);
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUserDbState(incoming());
+      allow update: if isOwner(userId) && isValidId(userId) && isValidUserDbState(incoming());
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+  }
+}
