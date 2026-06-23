@@ -15,6 +15,8 @@ export interface Participant {
   village?: string;
   caregiver?: string;
   gender?: string;
+  schoolingStatus?: 'Day Scholar' | 'Boarder' | string;
+  schoolClass?: string;
   isFormer?: boolean;
   formerDate?: string;
   photoUrl?: string;
@@ -22,6 +24,14 @@ export interface Participant {
   isImported?: boolean;
   scannedForms?: ScannedForm[];
   documents?: OfficialDocument[];
+  filledForms?: FilledForm[];
+}
+
+export interface FilledForm {
+  id: string;
+  type: 'Home Visit' | 'Sick Participant Follow' | 'Follow-Up' | 'Referral' | 'Discharge Summary' | 'School Visit';
+  date: string;
+  data: any; // Flexible JSON payload for the form form data
 }
 
 export interface OfficialDocument {
@@ -98,6 +108,8 @@ export interface AttendanceRecord {
 export interface Session {
   date: string; // YYYY-MM-DD
   label?: string; // e.g., "Sprint 1 Kickoff", "Session 4"
+  checklist?: Record<string, boolean>;
+  notes?: string;
 }
 
 export interface AttendanceStats {

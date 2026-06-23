@@ -3,6 +3,39 @@ import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import { db } from "./src/db/index.ts";
+import { users, participants, sessions, attendance } from "./src/db/schema.ts";
+import { eq, and } from "drizzle-orm";
+import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
+import { getOrCreateUser } from "./src/db/users.ts";
+
+// Helper function to call Gemini with exponential backoff retry mechanism for resilient generations
+async function callGeminiWithRetry<T>(apiCall: () => Promise<T>, maxRetries = 3, initialDelay = 1500): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await apiCall();
+    } catch (error: any) {
+      attempt++;
+      const errMsg = error?.message || '';
+      const status = error?.status;
+      const isTransient = status === 503 || status === 429 || status === 500 ||
+                          errMsg.includes("503") || 
+                          errMsg.includes("UNAVAILABLE") ||
+                          errMsg.includes("Resource exhausted") ||
+                          errMsg.includes("high demand") ||
+                          errMsg.includes("overloaded");
+                          
+      if (isTransient && attempt < maxRetries) {
+        const delay = initialDelay * Math.pow(2, attempt) + Math.random() * 800;
+        console.warn(`[WARNING] Gemini API call failed with transient error (status: ${status || 'unknown'}, msg: "${errMsg}"). Retrying attempt ${attempt}/${maxRetries} in ${Math.round(delay)}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
 
 async function startServer() {
   const app = express();
@@ -11,46 +44,218 @@ async function startServer() {
   // Middleware to support JSON parsing with reasonable limit for backing up large student lists
   app.use(express.json({ limit: "50mb" }));
 
-  // Ensure backup directory exists
-  const dataDir = path.join(process.cwd(), "data");
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
-  const dbPath = path.join(dataDir, "backup_db.json");
-
-  // API Route - Get latest backed up database
-  app.get("/api/sync", (req, res) => {
+  // API Route - Get latest backed up database from Postgres/Cloud SQL
+  app.get("/api/sync", requireAuth, async (req: AuthRequest, res) => {
     try {
-      if (fs.existsSync(dbPath)) {
-        const data = fs.readFileSync(dbPath, "utf8");
-        return res.json(JSON.parse(data));
+      if (!req.user || !req.user.uid) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
-      return res.json(null);
+
+      // 1. Get or create user
+      const dbUser = await getOrCreateUser(req.user.uid, req.user.email || "");
+
+      // 2. Fetch all participants
+      const dbParticipants = await db.select()
+        .from(participants)
+        .where(eq(participants.userId, dbUser.id));
+
+      // 3. Fetch all sessions
+      const dbSessions = await db.select()
+        .from(sessions)
+        .where(eq(sessions.userId, dbUser.id));
+
+      // 4. Fetch all attendance records
+      const dbAttendance = await db.select()
+        .from(attendance)
+        .where(eq(attendance.userId, dbUser.id));
+
+      // 5. Structure attendance records as a Map: Record<participantId, Record<dateStr, status>>
+      const attendanceMap: Record<string, Record<string, string>> = {};
+      for (const record of dbAttendance) {
+        if (!attendanceMap[record.participantId]) {
+          attendanceMap[record.participantId] = {};
+        }
+        attendanceMap[record.participantId][record.date] = record.status;
+      }
+
+      const metadata: any = dbUser.metadata || {};
+
+      return res.json({
+        participants: dbParticipants.map(p => ({
+          ...p,
+          scannedForms: p.scannedForms || [],
+          documents: p.documents || [],
+          filledForms: p.filledForms || [],
+          outreachNotes: p.outreachNotes || [],
+        })),
+        sessions: dbSessions,
+        attendance: attendanceMap,
+        emailedSessionDates: metadata.emailedSessionDates || [],
+        dismissedEmailDates: metadata.dismissedEmailDates || [],
+        lastEmailedSessionDate: metadata.lastEmailedSessionDate || "",
+        staffEmailRecipient: metadata.staffEmailRecipient || "",
+        isAutomaticEmailEnabled: metadata.isAutomaticEmailEnabled || false
+      });
     } catch (error: any) {
-      console.error("Failed to read server backup file:", error);
-      return res.status(500).json({ error: error.message });
+      console.error("Failed to read database records from Cloud SQL:", error);
+      return res.status(500).json({ error: "Cloud SQL lookup failed. Please try again later.", details: error.message });
     }
   });
 
-  // API Route - Save/Backup database to server-side storage
-  app.post("/api/sync", (req, res) => {
+  // API Route - Save/Backup database to relational Cloud SQL storage
+  app.post("/api/sync", requireAuth, async (req: AuthRequest, res) => {
     try {
-      const payload = req.body;
-      if (!payload || typeof payload !== "object") {
-        return res.status(400).json({ error: "Invalid payload format" });
+      if (!req.user || !req.user.uid) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
 
-      fs.writeFileSync(dbPath, JSON.stringify(payload, null, 2), "utf8");
+      const { 
+        participants: clientParticipants, 
+        sessions: clientSessions, 
+        attendance: clientAttendance,
+        emailedSessionDates,
+        dismissedEmailDates,
+        lastEmailedSessionDate,
+        staffEmailRecipient,
+        isAutomaticEmailEnabled
+      } = req.body;
+
+      // 1. Get or create user in DB
+      const dbUser = await getOrCreateUser(req.user.uid, req.user.email || "");
+
+      // 2. Update user metadata
+      await db.update(users)
+        .set({
+          metadata: {
+            emailedSessionDates: emailedSessionDates || [],
+            dismissedEmailDates: dismissedEmailDates || [],
+            lastEmailedSessionDate: lastEmailedSessionDate || "",
+            staffEmailRecipient: staffEmailRecipient || "",
+            isAutomaticEmailEnabled: !!isAutomaticEmailEnabled
+          }
+        })
+        .where(eq(users.id, dbUser.id));
+
+      // 3. Sync participants in batch (sequentially/upsertly)
+      if (clientParticipants && Array.isArray(clientParticipants)) {
+        for (const p of clientParticipants) {
+          if (!p.id || !p.name) continue;
+          await db.insert(participants)
+            .values({
+              id: p.id,
+              userId: dbUser.id,
+              name: p.name,
+              contact: p.contact || "",
+              cohort: p.cohort || "",
+              joinDate: p.joinDate || new Date().toISOString().split('T')[0],
+              avatarColor: p.avatarColor || "#CBD5E1",
+              registrationNotes: p.registrationNotes || null,
+              idNo: p.idNo || null,
+              age: p.age ? String(p.age) : null,
+              dob: p.dob || null,
+              village: p.village || null,
+              caregiver: p.caregiver || null,
+              gender: p.gender || null,
+              schoolingStatus: p.schoolingStatus || null,
+              schoolClass: p.schoolClass || null,
+              isFormer: !!p.isFormer,
+              formerDate: p.formerDate || null,
+              photoUrl: p.photoUrl || null,
+              isPermanent: !!p.isPermanent,
+              isImported: !!p.isImported,
+              scannedForms: p.scannedForms || null,
+              documents: p.documents || null,
+              filledForms: p.filledForms || null,
+              outreachNotes: p.outreachNotes || null,
+            })
+            .onConflictDoUpdate({
+              target: participants.id,
+              set: {
+                name: p.name,
+                contact: p.contact || "",
+                cohort: p.cohort || "",
+                joinDate: p.joinDate || new Date().toISOString().split('T')[0],
+                avatarColor: p.avatarColor || "#CBD5E1",
+                registrationNotes: p.registrationNotes || null,
+                idNo: p.idNo || null,
+                age: p.age ? String(p.age) : null,
+                dob: p.dob || null,
+                village: p.village || null,
+                caregiver: p.caregiver || null,
+                gender: p.gender || null,
+                schoolingStatus: p.schoolingStatus || null,
+                schoolClass: p.schoolClass || null,
+                isFormer: !!p.isFormer,
+                formerDate: p.formerDate || null,
+                photoUrl: p.photoUrl || null,
+                isPermanent: !!p.isPermanent,
+                isImported: !!p.isImported,
+                scannedForms: p.scannedForms || null,
+                documents: p.documents || null,
+                filledForms: p.filledForms || null,
+                outreachNotes: p.outreachNotes || null,
+              }
+            });
+        }
+      }
+
+      // 4. Sync sessions in batch (sequentially/upsertly)
+      if (clientSessions && Array.isArray(clientSessions)) {
+        for (const s of clientSessions) {
+          if (!s.date) continue;
+          await db.insert(sessions)
+            .values({
+              userId: dbUser.id,
+              date: s.date,
+              label: s.label || null,
+              checklist: s.checklist || null,
+              notes: s.notes || null,
+            })
+            .onConflictDoUpdate({
+              target: [sessions.userId, sessions.date],
+              set: {
+                label: s.label || null,
+                checklist: s.checklist || null,
+                notes: s.notes || null,
+              }
+            });
+        }
+      }
+
+      // 5. Sync attendance records
+      if (clientAttendance && typeof clientAttendance === 'object') {
+        for (const [pId, datesObj] of Object.entries(clientAttendance)) {
+          if (!datesObj || typeof datesObj !== 'object') continue;
+          for (const [dStr, statusVal] of Object.entries(datesObj)) {
+            if (!statusVal) continue;
+            await db.insert(attendance)
+              .values({
+                userId: dbUser.id,
+                participantId: pId,
+                date: dStr,
+                status: statusVal as string,
+              })
+              .onConflictDoUpdate({
+                target: [attendance.userId, attendance.participantId, attendance.date],
+                set: {
+                  status: statusVal as string,
+                }
+              });
+          }
+        }
+      }
+
       return res.json({ 
         success: true, 
         timestamp: new Date().toISOString(),
-        message: "Data successfully synchronized and saved on server storage."
+        message: "Data successfully synchronized and saved on Cloud SQL Postgres instance."
       });
     } catch (error: any) {
-      console.error("Failed to write server backup file:", error);
-      return res.status(500).json({ error: error.message });
+      console.error("Failed to commit synchronize records to Cloud SQL:", error);
+      return res.status(500).json({ error: "Cloud SQL sync failed. Please try again later.", details: error.message });
     }
   });
+
 
   // API Route - Analyze student performance
   app.post("/api/gemini/analyze-student", async (req, res) => {
@@ -60,9 +265,22 @@ async function startServer() {
         return res.status(400).json({ error: "GEMINI_API_KEY environment variable is not configured. Please add your Gemini API Key in Settings > Secrets." });
       }
 
-      const { participant, stats } = req.body;
+      const { participant, stats, dateRange, attendanceHistory } = req.body;
       if (!participant || !stats) {
         return res.status(400).json({ error: "Missing participant or stats data." });
+      }
+
+      // Filter structured forms and casework history based on dateRange
+      let filteredForms = participant.filledForms || [];
+      let filteredLogs = participant.outreachNotes || [];
+      
+      if (dateRange && dateRange.start) {
+        filteredForms = filteredForms.filter((f: any) => f.date >= dateRange.start);
+        filteredLogs = filteredLogs.filter((l: any) => l.date >= dateRange.start);
+      }
+      if (dateRange && dateRange.end) {
+        filteredForms = filteredForms.filter((f: any) => f.date <= dateRange.end);
+        filteredLogs = filteredLogs.filter((l: any) => l.date <= dateRange.end);
       }
 
       const ai = new GoogleGenAI({
@@ -108,6 +326,9 @@ ${(participant.scannedForms || []).map((form: any) => {
   return `- File [${form.formType.toUpperCase()}]: ${form.fileName} (Uploaded: ${form.uploadDate}) -> ${formDetailsStr}`;
 }).join('\n') || 'No scanned welfare forms or academic checkup records registered on file.'}
 
+STRUCTURED ASSESSMENT FORMS FILLED:
+${filteredForms.map((form: any) => `- Type: ${form.type}, Date: ${form.date}, Content: ${JSON.stringify(form.data)}`).join('\n') || 'No structured forms recorded within this period.'}
+
 ATTENDANCE SUMMARY:
 - Total sessions: ${stats.totalSessions}
 - Attended: ${stats.totalPresent} (Rate: ${stats.attendanceRate}%)
@@ -115,13 +336,19 @@ ATTENDANCE SUMMARY:
 - Excused: ${stats.totalExcused}
 - Alerts status: ${stats.hasRedFlag ? '🔴 RED WARNING ALERT (3+ missed)' : stats.hasYellowFlag ? '🟡 YELLOW WARNING ALERT (2 consecutive miss)' : '🟢 Normal standing'}
 
+RECENT CHRONOLOGICAL SESSION-BY-SESSION ATTENDANCE TIMELINE:
+${attendanceHistory && attendanceHistory.length > 0 
+  ? attendanceHistory.map((rec: any) => `- Date: ${rec.date} | Session: ${rec.label || 'Regular Session'} | Status: ${rec.status.toUpperCase()}`).join('\n')
+  : 'No detailed session historical records registered.'}
+
 CASEWORK HISTORY NOTES:
-${(participant.outreachNotes || []).map((note: any) => `- Date: ${note.date}, Status: ${note.status}, LoggedBy: ${note.loggedBy}, Details: ${note.notes}`).join('\n') || 'No casework logs on record.'}
+${filteredLogs.map((note: any) => `- Date: ${note.date}, Status: ${note.status}, LoggedBy: ${note.loggedBy}, Details: ${note.notes}`).join('\n') || 'No casework logs on record within this period.'}
 
 Please return a JSON-structured performance report. Provide deep, qualitative insights to assist the staff in optimizing their outreach or counseling interventions. Reference any noteworthy medical warnings, academic performances, or home visit difficulties that were retrieved from their scanned files.
+${dateRange?.start || dateRange?.end ? `PLEASE NOTE: This report is focused on the date range from ${dateRange.start || 'Beginning'} to ${dateRange.end || 'Now'}.` : ''}
 `;
 
-      const response = await ai.models.generateContent({
+      const response = await callGeminiWithRetry(() => ai.models.generateContent({
         model: "gemini-3.5-flash",
         contents: prompt,
         config: {
@@ -141,7 +368,7 @@ Please return a JSON-structured performance report. Provide deep, qualitative in
             required: ["summary", "attendanceScoreAnalysis", "insights", "recommendation"]
           }
         }
-      });
+      }));
 
       const responseText = response.text || "{}";
       const parsed = JSON.parse(responseText.trim());
@@ -161,7 +388,7 @@ Please return a JSON-structured performance report. Provide deep, qualitative in
         return res.status(400).json({ error: "GEMINI_API_KEY environment variable is not configured. Please add your Gemini API Key in Settings > Secrets." });
       }
 
-      const { participants, statsMap } = req.body;
+      const { participants, statsMap, dateRange, computedStats, attendance, sessions } = req.body;
       if (!participants || !Array.isArray(participants) || !statsMap) {
         return res.status(400).json({ error: "Missing participants or stats map list." });
       }
@@ -180,32 +407,93 @@ Please return a JSON-structured performance report. Provide deep, qualitative in
         const stats = statsMap[p.id] || { attendanceRate: 100, totalSessions: 0, totalPresent: 0, totalAbsent: 0, hasRedFlag: false, hasYellowFlag: false };
         const alertStr = stats.hasRedFlag ? '🔴 Red Alert' : stats.hasYellowFlag ? '🟡 Yellow Alert' : '🟢 Stable';
         
+        // Find general info extracted from scanned forms
+        const medicalForm = p.scannedForms?.find((f: any) => f.formType === 'medical')?.extractedData?.medical || {};
+        const schoolForm = p.scannedForms?.find((f: any) => f.formType === 'school')?.extractedData?.school || {};
+        const homeVisitForm = p.scannedForms?.find((f: any) => f.formType === 'home_visit')?.extractedData?.home_visit || {};
+
+        let forms = p.filledForms || [];
+        let logs = p.outreachNotes || [];
+        
+        if (dateRange && dateRange.start) {
+          forms = forms.filter((f: any) => f.date >= dateRange.start);
+          logs = logs.filter((l: any) => l.date >= dateRange.start);
+        }
+        if (dateRange && dateRange.end) {
+          forms = forms.filter((f: any) => f.date <= dateRange.end);
+          logs = logs.filter((l: any) => l.date <= dateRange.end);
+        }
+
+        // Derive recent chronological session status
+        let pSessions = sessions || [];
+        if (dateRange && dateRange.start) {
+          pSessions = pSessions.filter((s: any) => s.date >= dateRange.start);
+        }
+        if (dateRange && dateRange.end) {
+          pSessions = pSessions.filter((s: any) => s.date <= dateRange.end);
+        }
+        const sortedPSessions = [...pSessions].sort((a: any, b: any) => b.date.localeCompare(a.date));
+        const pRecord = (attendance && attendance[p.id]) || {};
+        const recentAttendance = sortedPSessions.slice(0, 10).map((s: any) => ({
+          date: s.date,
+          label: s.label || "Regular Session",
+          status: pRecord[s.date] || 'unmarked'
+        }));
+ 
         return {
           id: p.id,
           name: p.name,
           gender: p.gender || 'N/A',
           age: p.age || 'N/A',
           cohort: p.cohort,
+          village: p.village || 'N/A',
+          schoolingStatus: p.schoolingStatus || 'N/A',
           rate: `${stats.attendanceRate}%`,
           present: stats.totalPresent,
           absent: stats.totalAbsent,
           alert: alertStr,
-          logsCount: p.outreachNotes?.length || 0,
-          lastLog: p.outreachNotes?.length > 0 ? p.outreachNotes[p.outreachNotes.length - 1].notes.slice(0, 80) : 'None'
+          logsCount: logs.length,
+          formsCount: forms.length,
+          medicalSummary: medicalForm.healthStatusSummary || medicalForm.disabilitiesOrConditions || 'None',
+          academicGrade: schoolForm.gradeLevel || 'N/A',
+          academicScore: schoolForm.averageScorePercentage ? `${schoolForm.averageScorePercentage}%` : 'N/A',
+          academicRemarks: schoolForm.teacherRemarks || 'None',
+          lastLog: logs.length > 0 ? logs[0].notes.slice(0, 100) : 'None',
+          recentAttendance: recentAttendance,
+          formsDetails: forms.slice(0, 3).map((f: any) => ({ type: f.type, date: f.date, summary: JSON.stringify(f.data).slice(0, 150) }))
         };
       });
 
       const prompt = `
 You are an expert Social Welfare & Educational Cohort Success Director at Lomuriangole Child and Youth Development Center.
-Please review this aggregated performance roster of students. You MUST create an analytical progress evaluation synopsis for every participant listed.
+Please review this aggregated performance roster of students, along with pre-calculated system-wide statistics detailing overall cohort attendance, gender comparisons, village-level vulnerabilities, and schooling model performance. 
 
-STUDENTS DATA ROSTER DIGEST:
+You MUST create:
+1. A high-fidelity comprehensive overview of student progress, considering every system detail (school status, village access difficulties, medical issues).
+2. A rigorous comparative analysis of trends.
+3. Multi-thematic tactical recommendations at the end of the report.
+4. An analytical progress evaluation synopsis and next-steps for EVERY single student.
+
+${dateRange?.start || dateRange?.end ? `\nPLEASE NOTE: This report is focused on date range from ${dateRange.start || 'Beginning'} to ${dateRange.end || 'Now'}.\n` : ''}
+
+COMPUTED SYSTEM-WIDE COHORT STATISTICS:
+${computedStats ? JSON.stringify(computedStats, null, 2) : 'No client-side calculated variables provided.'}
+
+STUDENTS DATA ROSTER DIGEST (WITH RECENT CHRONOLOGICAL DAILY ATTENDANCE RECORDS):
 ${JSON.stringify(studentDigest, null, 2)}
+
+Ensure you pay precise, critical attention to the "recentAttendance" chronological array for each student, looking for drop-off curves, sudden changes, or intermittent attendance to make your customized student evaluation synopsis and strategic recommendations.
 
 Provide a structured, unified report in JSON including:
 1. "cohortSummary": A high-level qualitative overview (1-2 paragraphs) detailing overall cohort enrollment robustness, common engagement trends, or environmental challenges.
 2. "overallRiskDistribution": Text-based statistical estimation detailing cohort health segments (e.g. Safe/Stable vs Moderate/Risk vs Critical Intervention).
-3. "studentReports": An array containing an entry for EVERY single participant in the input roster.
+3. "comparativeAnalysis": A rich comparative text (2-3 paragraphs) contrasting performance, health variables, and attendance across genders, villages, schooling models, or age bands. Discuss the math/stats explicitly.
+4. "systemStats": An object containing deep statistical commentary:
+   - "villageBreakdown": review of village-by-village participation dynamics or physical hurdles.
+   - "genderComparison": contrasts of engagement and attendance levels between male and female enrollees.
+   - "schoolingImpact": compares academic scores and attendance trends between Day Scholars and Boarding enrollees.
+5. "strategicRecommendations": An array of 3-5 high-quality, actionable, and concrete recommendations at the end of the report, each having a category (e.g., Medical Intervention, Academic Coaching, Travel & Logistical Aid, Family Counseling), specific initiative, priority level ("High", "Medium", or "Low"), and detailed qualitative rationale.
+6. "studentReports": An array containing an entry for EVERY single participant in the input roster.
 
 Each entry in "studentReports" must exactly have:
 - "participantId": string matching the student's id.
@@ -216,7 +504,7 @@ Each entry in "studentReports" must exactly have:
 - "recommendedAction": a specific, direct next step for the field counselor or staff to take (such as caregiver consultation, home visitation, or local transport assistance).
 `;
 
-      const response = await ai.models.generateContent({
+      const response = await callGeminiWithRetry(() => ai.models.generateContent({
         model: "gemini-3.5-flash",
         contents: prompt,
         config: {
@@ -226,6 +514,29 @@ Each entry in "studentReports" must exactly have:
             properties: {
               cohortSummary: { type: "STRING" },
               overallRiskDistribution: { type: "STRING" },
+              comparativeAnalysis: { type: "STRING" },
+              systemStats: {
+                type: "OBJECT",
+                properties: {
+                  villageBreakdown: { type: "STRING" },
+                  genderComparison: { type: "STRING" },
+                  schoolingImpact: { type: "STRING" }
+                },
+                required: ["villageBreakdown", "genderComparison", "schoolingImpact"]
+              },
+              strategicRecommendations: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    category: { type: "STRING" },
+                    initiative: { type: "STRING" },
+                    priority: { type: "STRING" },
+                    rationale: { type: "STRING" }
+                  },
+                  required: ["category", "initiative", "priority", "rationale"]
+                }
+              },
               studentReports: {
                 type: "ARRAY",
                 items: {
@@ -242,10 +553,10 @@ Each entry in "studentReports" must exactly have:
                 }
               }
             },
-            required: ["cohortSummary", "overallRiskDistribution", "studentReports"]
+            required: ["cohortSummary", "overallRiskDistribution", "comparativeAnalysis", "systemStats", "strategicRecommendations", "studentReports"]
           }
         }
-      });
+      }));
 
       const responseText = response.text || "{}";
       const parsed = JSON.parse(responseText.trim());
@@ -354,7 +665,7 @@ Extract a general title, summary and key takeaways.`;
         };
       }
 
-      const response = await ai.models.generateContent({
+      const response = await callGeminiWithRetry(() => ai.models.generateContent({
         model: "gemini-3.5-flash",
         contents: {
           parts: [
@@ -376,7 +687,7 @@ Extract a general title, summary and key takeaways.`;
             properties: schemaProperties
           }
         }
-      });
+      }));
 
       const textResult = response.text || "{}";
       const parsedData = JSON.parse(textResult.trim());
@@ -389,6 +700,157 @@ Extract a general title, summary and key takeaways.`;
     } catch (error: any) {
       console.error("Gemini form scanner analysis failed:", error);
       return res.status(505).json({ error: error.message || "Failed to analyze and scan the document." });
+    }
+  });
+
+  // API Route - Compose personalized caregiver SMS outreach message
+  app.post("/api/gemini/compose-sms", async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(400).json({ error: "GEMINI_API_KEY environment variable is not configured. Please add your Gemini API Key in Settings > Secrets." });
+      }
+
+      const { student, type, tone, extraContext } = req.body;
+      if (!student) {
+        return res.status(400).json({ error: "Missing required student parameter." });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey: apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
+      const statsText = `Attendance Rate: ${student.attendanceRate || 'N/A'}. Alert status: ${student.alertStatus || 'stable'}.`;
+      const caregiverName = student.caregiver && student.caregiver !== '-' ? student.caregiver : 'Caregiver';
+
+      // Parse scanned forms if any to customize the outreach
+      const medicalForm = student.scannedForms?.find((f: any) => f.formType === 'medical')?.extractedData?.medical || {};
+      const schoolForm = student.scannedForms?.find((f: any) => f.formType === 'school')?.extractedData?.school || {};
+      const homeVisitForm = student.scannedForms?.find((f: any) => f.formType === 'home_visit')?.extractedData?.home_visit || {};
+
+      let detailsContext = "";
+      if (medicalForm.healthStatusSummary) detailsContext += `Medical Notes: "${medicalForm.healthStatusSummary}". `;
+      if (schoolForm.averageScorePercentage) detailsContext += `Academic: "${schoolForm.schoolName}" school, Grade ${schoolForm.gradeLevel}, average score ${schoolForm.averageScorePercentage}%. `;
+      if (homeVisitForm.riskVulnerabilitiesSummary) detailsContext += `Home visit vulnerability notes: "${homeVisitForm.riskVulnerabilitiesSummary}". `;
+
+      const prompt = `
+You are an expert student counselor and caseworker communications assistant at Lomuriangole Child and Youth Development Center in Moroto, Uganda.
+Please compose a short, respectful, and culturally appropriate SMS invitation/notification message to send to a student's caregiver.
+
+RECIPIENT & CONTEXT:
+- Caregiver Name: ${caregiverName}
+- Student Name: ${student.name}
+- Student Age/Gender: ${student.age || 'N/A'} (${student.gender || 'N/A'})
+- Stats & Alerts: ${statsText}
+- Scanned Welfare Dossier Context (if any): ${detailsContext}
+- Communication Campaign Topic: ${type}
+- Desired Tone: ${tone}
+- Additional Staff Guidance/Context: ${extraContext || 'None'}
+
+CONSTRAINTS:
+1. The message must be concise (ideally under 140-160 characters, suitable for basic SMS length, though can go slightly longer if needed).
+2. Use extremely polite, humble language, ideally opening with a humble greeting (e.g. "We greet you", "Greetings from Lomuriangole CYDC", "Hello [Caregiver Name], greetings of peace from Lomuriangole").
+3. Ensure the message is supportive, clear, and invites collaboration, making the parent feel valued.
+4. Keep the text simple, direct, and straightforward to translate into Karimojong (Ngakarimojong) language or plain English. Avoid complex slang.
+5. Do NOT output markdown, quotes, formatting prefixes, or anything else. Just output the raw message text ready to copy or send immediately.
+`;
+
+      const response = await callGeminiWithRetry(() => ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: prompt,
+      }));
+
+      const responseText = (response.text || "").trim();
+      return res.json({ success: true, sms: responseText });
+
+    } catch (error: any) {
+      console.error("Gemini SMS outreach composer failed:", error);
+      return res.status(500).json({ error: error.message || "Failed to compose SMS message." });
+    }
+  });
+
+  // API Route - Direct Mobile SMS Transmitter via Africa's Talking Gateway
+  app.post("/api/africastalking/send-sms", async (req, res) => {
+    try {
+      const username = process.env.AFRICASTALKING_USERNAME;
+      const apiKey = process.env.AFRICASTALKING_API_KEY;
+      const senderId = process.env.AFRICASTALKING_SENDER_ID; // Optional
+
+      const { to, message } = req.body;
+
+      if (!to || !message) {
+        return res.status(400).json({ error: "Missing required 'to' (recipient cell) or 'message' parameters." });
+      }
+
+      // Check if Africa's Talking is configured. If not, toggle safe simulation mode with verbose setup details.
+      if (!apiKey) {
+        console.warn("[Africa's Talking] API Key not configured. Running safe sandbox simulator.");
+        return res.json({
+          success: true,
+          isSimulated: true,
+          message: `[SIMULATED TRANSMISSION] Successfully transmitted message to Africa's Talking virtual gateway for number ${to}: "${message}"`,
+          recipient: to,
+          info: "To transition to live broadcast, configure AFRICASTALKING_API_KEY and AFRICASTALKING_USERNAME in your Settings > Secrets or environment."
+        });
+      }
+
+      const apiUsername = username || "sandbox";
+      const isSandbox = apiUsername.toLowerCase() === "sandbox";
+      const endpoint = isSandbox
+        ? "https://api.sandbox.africastalking.com/version1/messaging"
+        : "https://api.africastalking.com/version1/messaging";
+
+      const params = new URLSearchParams();
+      params.append("username", apiUsername);
+      params.append("to", to);
+      params.append("message", message);
+      if (senderId) {
+        params.append("from", senderId);
+      }
+
+      // Perform node fetch request
+      const atResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+          "apiKey": apiKey
+        },
+        body: params.toString()
+      });
+
+      const responseText = await atResponse.text();
+      let result: any = {};
+      try {
+        result = JSON.parse(responseText);
+      } catch (parseErr) {
+        result = { raw: responseText };
+      }
+
+      if (!atResponse.ok) {
+        return res.status(atResponse.status).json({
+          success: false,
+          error: `Africa's Talking gateway reported an error: ${result.errorMessage || responseText || 'Unknown gateway exception'}`
+        });
+      }
+
+      return res.json({
+        success: true,
+        isSimulated: false,
+        data: result
+      });
+
+    } catch (error: any) {
+      console.error("Africa's Talking SMS delivery exception:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message || "Failed to deliver SMS through local Express proxy."
+      });
     }
   });
 

@@ -17,6 +17,26 @@
           "type": "object",
           "description": "Nested records of student attendance statuses mapped by participantId and date"
         },
+        "emailedSessionDates": {
+          "type": "array",
+          "description": "Array of session dates that have been emailed to staff"
+        },
+        "dismissedEmailDates": {
+          "type": "array",
+          "description": "Array of session dates that have been manually dismissed"
+        },
+        "lastEmailedSessionDate": {
+          "type": "string",
+          "description": "Most recent session date that had an alert email sent"
+        },
+        "staffEmailRecipient": {
+          "type": "string",
+          "description": "Configured staff email recipient for reports"
+        },
+        "isAutomaticEmailEnabled": {
+          "type": "boolean",
+          "description": "Whether real-time automatic background outreach emails are enabled"
+        },
         "lastUpdated": {
           "type": "string",
           "format": "date-time",

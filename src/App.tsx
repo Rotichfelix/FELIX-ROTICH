@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, FormEvent, ChangeEvent, DragEvent, useMemo } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, Legend } from 'recharts';
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, Legend, LineChart, Line } from 'recharts';
 import { 
   MessageSquare,
   UserPlus, 
@@ -50,8 +50,9 @@ import {
   Bell
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import { getLogoBase64DataUri, LogoSVG } from './components/LogoSVG';
 import { db, auth, googleProvider, storage } from './firebase';
-import { onAuthStateChanged, signInWithPopup, signOut, User, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, GoogleAuthProvider } from 'firebase/auth';
+import { onAuthStateChanged, signInWithPopup, signOut, User, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, GoogleAuthProvider, sendEmailVerification } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { 
@@ -60,7 +61,9 @@ import {
   AttendanceRecord, 
   AttendanceStatus,
   OutreachLog,
-  AttendanceStats
+  AttendanceStats,
+  OfficialDocument,
+  FilledForm
 } from './types';
 import { 
   INITIAL_PARTICIPANTS, 
@@ -78,6 +81,9 @@ import {
   formatMonthLabel,
   calculateAgeFromDob
 } from './utils';
+import { FormModal } from './components/FormModal';
+import { generateFormPDF } from './utils/formPdf';
+import { SessionInspectorModal } from './components/SessionInspectorModal';
 
 /**
  * Flags if a participant is due for caregiver outreach based on the rule:
@@ -143,6 +149,15 @@ export function isDueForCaregiverOutreach(p: Participant, today: Date = new Date
   return false;
 }
 
+export const AGE_BRACKETS = [
+  { id: 'all', label: 'All Age Brackets', min: '', max: '' },
+  { id: 'ecd', label: '👶 ECD (3 - 5 yrs)', min: '3', max: '5' },
+  { id: 'early-primary', label: '🧒 Early Primary (6 - 8 yrs)', min: '6', max: '8' },
+  { id: 'pre-teen', label: '👦 Pre-Teen (9 - 12 yrs)', min: '9', max: '12' },
+  { id: 'adolescents', label: '🧑 Adolescents (13 - 17 yrs)', min: '13', max: '17' },
+  { id: 'youth', label: '🧑‍🎓 Youth / Adults (18+  yrs)', min: '18', max: '22' }
+];
+
 export default function App() {
   // ---- STATE MANAGEMENT DECLARATION ----
   const [participants, setParticipants] = useState<Participant[]>(() => {
@@ -151,7 +166,12 @@ export default function App() {
       if (local) {
         const parsed = JSON.parse(local);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+          const seen = new Set<string>();
+          return parsed.filter(p => {
+            if (!p || !p.id || seen.has(p.id)) return false;
+            seen.add(p.id);
+            return true;
+          });
         }
       }
     } catch (e) {
@@ -188,15 +208,39 @@ export default function App() {
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
+  const [adminActiveSearchQuery, setAdminActiveSearchQuery] = useState('');
+  const [adminFormerSearchQuery, setAdminFormerSearchQuery] = useState('');
+  const [liveVerificationSearchQuery, setLiveVerificationSearchQuery] = useState('');
   const [selectedCohort, setSelectedCohort] = useState('All Cohorts');
+  const [selectedVillage, setSelectedVillage] = useState('All Villages');
   const [selectedSegment, setSelectedSegment] = useState<'all' | 'male' | 'female' | 'under12' | '12to14' | '15to18' | '19plus'>('all');
+  const [selectedSchoolingStatus, setSelectedSchoolingStatus] = useState('All');
+  const [selectedSchoolClass, setSelectedSchoolClass] = useState('All');
   const [selectedFlag, setSelectedFlag] = useState<'all' | 'red' | 'yellow' | 'normal' | 'due_checkin'>('all');
   const [attendanceSortOrder, setAttendanceSortOrder] = useState<'none' | 'best' | 'worst'>('none');
+  const [filterYearStart, setFilterYearStart] = useState<string>('');
+  const [filterYearEnd, setFilterYearEnd] = useState<string>('');
+  const [filterYearType, setFilterYearType] = useState<'join' | 'dob'>('join');
+  const [filterAgeStart, setFilterAgeStart] = useState<string>('');
+  const [filterAgeEnd, setFilterAgeEnd] = useState<string>('');
   const [currentTab, setCurrentTab] = useState<'tracker' | 'journal' | 'admin' | 'ai-analyst'>('tracker');
   const [aiReportLoading, setAiReportLoading] = useState(false);
+  const [activeStatsTab, setActiveStatsTab] = useState<'cohorts' | 'villages' | 'genders' | 'schooling'>('cohorts');
   const [aiCohortReport, setAiCohortReport] = useState<{
     cohortSummary: string;
     overallRiskDistribution: string;
+    comparativeAnalysis: string;
+    systemStats: {
+      villageBreakdown: string;
+      genderComparison: string;
+      schoolingImpact: string;
+    };
+    strategicRecommendations: Array<{
+      category: string;
+      initiative: string;
+      priority: string;
+      rationale: string;
+    }>;
     studentReports: Array<{
       participantId: string;
       name: string;
@@ -241,9 +285,12 @@ export default function App() {
   const [journalSearchQuery, setJournalSearchQuery] = useState('');
   const [journalStatusFilter, setJournalStatusFilter] = useState<'all' | 'pending' | 'contacted' | 'resolved'>('all');
   const [journalAlertFilter, setJournalAlertFilter] = useState<'all' | 'red_alert'>('all');
+  const [journalStartDate, setJournalStartDate] = useState('');
+  const [journalEndDate, setJournalEndDate] = useState('');
 
   // Interactive Modal UI state
   const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null);
+  const [selectedSessionDate, setSelectedSessionDate] = useState<string | null>(null);
   const [isAddParticipantOpen, setIsAddParticipantOpen] = useState(false);
   const [isAddSessionOpen, setIsAddSessionOpen] = useState(false);
   const [isMonthlyReportOpen, setIsMonthlyReportOpen] = useState(false);
@@ -261,11 +308,39 @@ export default function App() {
   const [emailAlertSuccess, setEmailAlertSuccess] = useState<string | null>(null);
   const [emailAlertError, setEmailAlertError] = useState<string | null>(null);
   const [isAutomaticEmailEnabled, setIsAutomaticEmailEnabled] = useState<boolean>(() => {
-    return localStorage.getItem('attendance_tracker_auto_email_enabled') !== 'false';
+    return localStorage.getItem('attendance_tracker_auto_email_enabled') === 'true'; // Default to false (conservative) to prevent unsolicited background emails
   });
   const [lastEmailedSessionDate, setLastEmailedSessionDate] = useState<string | null>(() => {
     return localStorage.getItem('attendance_tracker_last_emailed_session_date') || null;
   });
+  const [emailedSessionDates, setEmailedSessionDates] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem('attendance_tracker_emailed_session_dates');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    const legacy = localStorage.getItem('attendance_tracker_last_emailed_session_date');
+    return legacy ? [legacy] : [];
+  });
+  const [dismissedEmailDates, setDismissedEmailDates] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem('attendance_tracker_dismissed_email_dates');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return [];
+  });
+  const [isEmailAlertModalOpen, setIsEmailAlertModalOpen] = useState(false);
+  const [emailModalSelectedDate, setEmailModalSelectedDate] = useState<string | null>(null);
+
   const [reportFilterMode, setReportFilterMode] = useState<'month' | 'custom'>('month');
   const [reportStartDate, setReportStartDate] = useState<string>(() => {
     const d = new Date();
@@ -286,6 +361,8 @@ export default function App() {
   const [newPartContact, setNewPartContact] = useState('');
   const [newPartCohort, setNewPartCohort] = useState('Victors Class');
   const [newPartGender, setNewPartGender] = useState('');
+  const [newPartSchoolingStatus, setNewPartSchoolingStatus] = useState('Day Scholar');
+  const [newPartSchoolClass, setNewPartSchoolClass] = useState('');
   const [newPartNotes, setNewPartNotes] = useState('');
 
   const [newSessionDate, setNewSessionDate] = useState(() => {
@@ -301,6 +378,173 @@ export default function App() {
   const [newLogNotes, setNewLogNotes] = useState('');
   const [newLogStatus, setNewLogStatus] = useState<'pending' | 'contacted' | 'resolved'>('pending');
   const [newLoggedBy, setNewLoggedBy] = useState('');
+
+  // AI-Powered Caregiver SMS Composer States
+  const [smsCampaignType, setSmsCampaignType] = useState<'absenteeism' | 'praise' | 'home_visit' | 'medical' | 'academic'>('absenteeism');
+  const [smsTone, setSmsTone] = useState<'polite' | 'urgent' | 'collaborative'>('polite');
+  const [smsExtraContext, setSmsExtraContext] = useState('');
+  const [smsDraftMessage, setSmsDraftMessage] = useState('');
+  const [isSmsGenerating, setIsSmsGenerating] = useState(false);
+  const [smsCopied, setSmsCopied] = useState(false);
+  const [smsSuccessMsg, setSmsSuccessMsg] = useState<string | null>(null);
+  const [smsAccordionExpanded, setSmsAccordionExpanded] = useState(false);
+
+  const getSmsDefaultMessage = (student: Participant, campaign: string, tone: string) => {
+    const caregiverName = student.caregiver && student.caregiver !== '-' ? student.caregiver : 'Caregiver';
+    const rate = participantStatsMap[student?.id]?.attendanceRate !== undefined ? `${participantStatsMap[student.id].attendanceRate}%` : '100%';
+    
+    switch (campaign) {
+      case 'absenteeism':
+        return `Dear ${caregiverName}, greetings from Lomuriangole CYDC. We are concerned about ${student.name}'s attendance which is currently at ${rate}. Please reach out to us at 0778687473 so we can discuss any challenges and support their continuity. Thank you and stay blessed.`;
+      case 'praise':
+        return `Dear ${caregiverName}, greetings of peace from Lomuriangole CYDC! We want to appreciate and congratulate you on ${student.name}'s excellent attendance of ${rate}. Your dedication to their growth is highly inspiring. Thank you for partnering with us.`;
+      case 'home_visit':
+        return `Dear ${caregiverName}, greetings from Lomuriangole CYDC. Our caseworkers would love to conduct a routine home visit to check in on ${student.name}'s well-being and family welfare. Please let us know if you will be home this week or call us at 0778687473.`;
+      case 'medical': {
+        const medicalForm = student.scannedForms?.find(f => f.formType === 'medical')?.extractedData?.medical || {};
+        const medCondStr = medicalForm.healthStatusSummary ? ` (${medicalForm.healthStatusSummary})` : '';
+        return `Dear ${caregiverName}, greetings from Lomuriangole CYDC health ministry. We would like to follow up on ${student.name}'s medical records and ongoing health status${medCondStr}. Please call us at 0778687473 or visit our office. Stay well.`;
+      }
+      case 'academic': {
+        const schoolForm = student.scannedForms?.find(f => f.formType === 'school')?.extractedData?.school || {};
+        const scoreStr = schoolForm.averageScorePercentage ? ` (${schoolForm.averageScorePercentage}% avg)` : '';
+        return `Dear ${caregiverName}, greetings from Lomuriangole CYDC. We are tracking ${student.name}'s academic progress${scoreStr}. We would love to review their school reports and performance cards. Please share details or visit us for coaching support. Thank you.`;
+      }
+      default:
+        return `Dear ${caregiverName}, greetings from Lomuriangole CYDC. Please contact our caseworker office regarding ${student.name} at 0778687473 at your earliest convenience. Thank you.`;
+    }
+  };
+
+  const handleGenerateSmsWithGemini = async () => {
+    if (!inspectedParticipant) return;
+    setIsSmsGenerating(true);
+    setSmsSuccessMsg(null);
+    try {
+      const response = await fetch('/api/gemini/compose-sms', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          student: inspectedParticipant,
+          type: smsCampaignType,
+          tone: smsTone,
+          extraContext: smsExtraContext
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Could not optimize SMS draft back-end request.');
+      }
+      const data = await response.json();
+      if (data.success && data.sms) {
+        setSmsDraftMessage(data.sms);
+        setSmsSuccessMsg('✨ Optimized with Gemini AI!');
+      } else {
+        throw new Error('Unable to optimize message.');
+      }
+    } catch (e: any) {
+      console.error(e);
+      setSmsSuccessMsg('⚠️ Error. Reverted to standard offline template.');
+    } finally {
+      setIsSmsGenerating(false);
+    }
+  };
+
+  // Re-generate message instantly when selecting a different participant or campaign topic
+  useEffect(() => {
+    if (inspectedParticipant) {
+      setSmsDraftMessage(getSmsDefaultMessage(inspectedParticipant, smsCampaignType, smsTone));
+      setSmsSuccessMsg(null);
+    }
+  }, [selectedParticipantId, smsCampaignType, smsTone]);
+
+  // Africa's Talking Direct Transmit handlers
+  const [isSendingDirectSms, setIsSendingDirectSms] = useState(false);
+  const [directSmsResponse, setDirectSmsResponse] = useState<{success: boolean; message: string; isSimulated: boolean} | null>(null);
+
+  const handleSendDirectSms = async () => {
+    if (!inspectedParticipant) return;
+    const rawNo = inspectedParticipant.contact || '';
+    // Normalize number - Africa's Talking requires international formats e.g. +256...
+    let cleanNo = rawNo.replace(/[^0-9+]/g, '');
+    if (!cleanNo.startsWith('+')) {
+      if (cleanNo.startsWith('0')) {
+        // Assume Uganda (+256) default for Moroto prefix
+        cleanNo = '+256' + cleanNo.slice(1);
+      } else if (cleanNo.length >= 9) {
+        cleanNo = '+256' + cleanNo;
+      }
+    }
+
+    if (cleanNo.length < 10) {
+      alert(`Invalid contact number format: "${rawNo}". Please configure a country code (e.g. +256778...) on this caregiver's profile before sending direct messages.`);
+      return;
+    }
+
+    if (!smsDraftMessage.trim()) {
+      alert("Please enter a valid message draft first.");
+      return;
+    }
+
+    setIsSendingDirectSms(true);
+    setDirectSmsResponse(null);
+    try {
+      const response = await fetch('/api/africastalking/send-sms', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          to: cleanNo,
+          message: smsDraftMessage
+        })
+      });
+
+      const resData = await response.json();
+      if (response.ok && resData.success) {
+        setDirectSmsResponse({
+          success: true,
+          message: resData.isSimulated 
+            ? `[TEST MODE] Successfully queued message to simulated gateway for contact ${cleanNo}`
+            : `[LOMURIALGOLE SMS] Successfully delivered message to Africa's Talking network!`,
+          isSimulated: !!resData.isSimulated
+        });
+        
+        // Log outreach log dynamically inside participant file records
+        const actorName = "Admin / Caseworker (via AT API)";
+        const newLogEntry = {
+          id: `outreach-${Date.now()}`,
+          date: new Date().toISOString().split('T')[0],
+          by: actorName,
+          status: 'contacted' as const,
+          notes: `[AT Gateway Direct SMS] Campaign: "${smsCampaignType}". Message: "${smsDraftMessage}"`
+        };
+
+        const updatedParticipants = participants.map(p => {
+          if (p.id === inspectedParticipant.id) {
+            return {
+              ...p,
+              outreachNotes: [newLogEntry, ...(p.outreachNotes || [])]
+            };
+          }
+          return p;
+        });
+        setParticipants(updatedParticipants);
+      } else {
+        throw new Error(resData.error || "Africa's Talking connection returned warnings.");
+      }
+    } catch (err: any) {
+      console.error("Direct SMS error:", err);
+      setDirectSmsResponse({
+        success: false,
+        message: err.message || "Failed to process SMS over local Express gateway.",
+        isSimulated: false
+      });
+    } finally {
+      setIsSendingDirectSms(false);
+    }
+  };
   
   // Visual state helpers
   const [copiedTemplate, setCopiedTemplate] = useState<'subject' | 'body' | null>(null);
@@ -325,9 +569,21 @@ export default function App() {
   const [isPasscodeFieldOpen, setIsPasscodeFieldOpen] = useState(false);
   const [passcodeAttempt, setPasscodeAttempt] = useState('');
   const [passcodeError, setPasscodeError] = useState('');
+  const [operatorName, setOperatorName] = useState(() => {
+    return localStorage.getItem('attendance_tracker_operator_name') || '';
+  });
+
+  const handleUpdateOperatorName = (name: string) => {
+    setOperatorName(name);
+    localStorage.setItem('attendance_tracker_operator_name', name);
+  };
 
   // Demographics Editing Space
   const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [isFormModalOpen, setIsFormModalOpen] = useState(false);
+  const [expandedFormId, setExpandedFormId] = useState<string | null>(null);
+  const [formType, setFormType] = useState<Required<FilledForm>['type']>('School Visit');
+  const [formData, setFormData] = useState<any>({});
   const [editName, setEditName] = useState('');
   const [editIdNo, setEditIdNo] = useState('');
   const [editAge, setEditAge] = useState('');
@@ -337,6 +593,8 @@ export default function App() {
   const [editCaregiver, setEditCaregiver] = useState('');
   const [editCohort, setEditCohort] = useState('');
   const [editContact, setEditContact] = useState('');
+  const [editSchoolingStatus, setEditSchoolingStatus] = useState('');
+  const [editSchoolClass, setEditSchoolClass] = useState('');
   const [editRegistrationNotes, setEditRegistrationNotes] = useState('');
 
   // AI Document Scanning State Variables
@@ -417,6 +675,70 @@ export default function App() {
   const [pdfActionPoints, setPdfActionPoints] = useState<string>('1. Conduct home check-in visit by center staff.\n2. Dedicate a peer mentorship peer or academic assistant.\n3. Keep continuous physical tracking logs at Center.');
   const [pdfStaffName, setPdfStaffName] = useState<string>('');
   const [pdfCaregiverName, setPdfCaregiverName] = useState<string>('');
+
+  // System activity journals and transaction logs audit trails
+  const [systemLogs, setSystemLogs] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_system_logs');
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (e) {
+      console.error("Failed to parse system logs from localStorage:", e);
+    }
+    return [
+      {
+        id: 'log_init_0',
+        timestamp: new Date(Date.now() - 3600000 * 2.5).toISOString(),
+        category: 'audit',
+        action: 'System Initialization',
+        details: 'Lomuriangole CYDC registry database loaded successfully into browser memory.',
+        operator: 'System Core'
+      },
+      {
+        id: 'log_init_1',
+        timestamp: new Date(Date.now() - 3600000 * 1.2).toISOString(),
+        category: 'transaction',
+        action: 'Roster Synchronization',
+        details: 'Checked offline data records and calibrated active candidate directories.',
+        operator: 'Sync Agent'
+      }
+    ];
+  });
+
+  const logSystemAction = (category: 'audit' | 'transaction', action: string, details: string, customOperator?: string) => {
+    setSystemLogs(prev => {
+      const defaultOpString = isAdminMode 
+        ? (operatorName.trim() ? `${operatorName.trim()} (Admin)` : 'Unlocked Administrator')
+        : (operatorName.trim() ? `${operatorName.trim()} (Staff)` : 'Staff Operator');
+      const op = customOperator || defaultOpString;
+      const newLog = {
+        id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        timestamp: new Date().toISOString(),
+        category,
+        action,
+        details,
+        operator: op
+      };
+      const updated = [newLog, ...prev].slice(0, 500);
+      localStorage.setItem('attendance_tracker_system_logs', JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  // Synchronize official browser icon favicon and window title with raw custom vector logo
+  useEffect(() => {
+    try {
+      const link = document.querySelector("link[rel~='icon']") as HTMLLinkElement || document.createElement('link');
+      link.type = 'image/svg+xml';
+      link.rel = 'icon';
+      link.href = getLogoBase64DataUri();
+      document.getElementsByTagName('head')[0].appendChild(link);
+      document.title = "Lomuriangole CYDC Tracker";
+    } catch (e) {
+      console.error("Failed to inject vector favicon:", e);
+    }
+  }, []);
 
   useEffect(() => {
     if (selectedParticipantId) {
@@ -570,14 +892,29 @@ export default function App() {
       participants: activeParticipantsList,
       sessions: activeSessionsList,
       attendance: activeAttendanceRecord,
+      emailedSessionDates,
+      dismissedEmailDates,
+      lastEmailedSessionDate,
+      staffEmailRecipient,
+      isAutomaticEmailEnabled,
       lastUpdated: new Date().toISOString()
     };
 
-    const docPath = `users/${auth.currentUser.uid}/data/metrics`;
-
     try {
-      const docRef = doc(db, 'users', auth.currentUser.uid, 'data', 'metrics');
-      await setDoc(docRef, dataToSync);
+      const token = await auth.currentUser.getIdToken();
+      const response = await fetch('/api/sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(dataToSync)
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || errData.details || 'Server sync failed');
+      }
 
       setSyncStatus('synced');
       setHasPendingUnsavedChanges(false);
@@ -587,19 +924,13 @@ export default function App() {
       setLastSyncTime(nowStr);
       localStorage.setItem('attendance_tracker_last_sync_time', nowStr);
     } catch (err: any) {
-      console.error("Cloud Firestore sync failing:", err);
+      console.error("Cloud SQL sync failing:", err);
       setSyncStatus('error');
-      setSyncErrorMsg(err.message || 'Firestore write failed');
-      
-      try {
-        handleFirestoreError(err, OperationType.WRITE, docPath);
-      } catch (_) {
-        // Logged diagnostic context to console already
-      }
+      setSyncErrorMsg(err.message || 'Cloud SQL write failed');
     }
   };
 
-  // Pull database state from Cloud Firestore
+  // Pull database state from Cloud SQL
   const triggerSyncDownload = async () => {
     if (!auth.currentUser) {
       alert("Please sign in first to fetch cloud data.");
@@ -611,54 +942,82 @@ export default function App() {
       return;
     }
 
-    if (window.confirm("Restore from Cloud:\nThis will replace your current local browser attendance data with the synced database saved securely in Cloud Firestore. Do you want to proceed?")) {
+    if (window.confirm("Restore from Cloud:\nThis will replace your current local browser attendance data with the synced database saved securely in Cloud SQL. Do you want to proceed?")) {
       setSyncStatus('syncing');
       setSyncErrorMsg(null);
 
-      const docPath = `users/${auth.currentUser.uid}/data/metrics`;
-
       try {
-        const docRef = doc(db, 'users', auth.currentUser.uid, 'data', 'metrics');
-        const docSnap = await getDoc(docRef);
-        
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          if (Array.isArray(data.participants) && Array.isArray(data.sessions) && typeof data.attendance === 'object') {
-            setParticipants(data.participants);
-            setSessions(data.sessions);
-            setAttendance(data.attendance);
-
-            // Save pulled values to local cache
-            localStorage.setItem('attendance_tracker_participants', JSON.stringify(data.participants));
-            localStorage.setItem('attendance_tracker_sessions', JSON.stringify(data.sessions));
-            localStorage.setItem('attendance_tracker_records', JSON.stringify(data.attendance));
-
-            setSyncStatus('synced');
-            setHasPendingUnsavedChanges(false);
-            localStorage.setItem('attendance_tracker_unsynced_changes', 'false');
-
-            const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' ' + new Date().toLocaleDateString();
-            setLastSyncTime(nowStr);
-            localStorage.setItem('attendance_tracker_last_sync_time', nowStr);
-            
-            alert("Success! Your device data is fully synced and updated from major cloud records.");
-          } else {
-            throw new Error("Cloud backup has an unrecognized structure or was corrupted.");
+        const token = await auth.currentUser.getIdToken();
+        const response = await fetch('/api/sync', {
+          headers: {
+            'Authorization': `Bearer ${token}`
           }
+        });
+
+        if (!response.ok) {
+          const errData = await response.json();
+          throw new Error(errData.error || 'Server download failed');
+        }
+
+        const data = await response.json();
+        
+        if (Array.isArray(data.participants) && Array.isArray(data.sessions) && typeof data.attendance === 'object') {
+          const seen = new Set<string>();
+          const uniqueParticipants = data.participants.filter(p => {
+            if (!p || !p.id || seen.has(p.id)) return false;
+            seen.add(p.id);
+            return true;
+          });
+
+          setParticipants(uniqueParticipants);
+          setSessions(data.sessions);
+          setAttendance(data.attendance);
+
+          if (Array.isArray(data.emailedSessionDates)) {
+            setEmailedSessionDates(data.emailedSessionDates);
+            localStorage.setItem('attendance_tracker_emailed_session_dates', JSON.stringify(data.emailedSessionDates));
+          }
+          if (Array.isArray(data.dismissedEmailDates)) {
+            setDismissedEmailDates(data.dismissedEmailDates);
+            localStorage.setItem('attendance_tracker_dismissed_email_dates', JSON.stringify(data.dismissedEmailDates));
+          }
+          if (data.lastEmailedSessionDate) {
+            setLastEmailedSessionDate(data.lastEmailedSessionDate);
+            localStorage.setItem('attendance_tracker_last_emailed_session_date', data.lastEmailedSessionDate);
+          }
+          if (data.staffEmailRecipient) {
+            setStaffEmailRecipient(data.staffEmailRecipient);
+            localStorage.setItem('attendance_tracker_staff_email_recipient', data.staffEmailRecipient);
+          }
+          if (typeof data.isAutomaticEmailEnabled === 'boolean') {
+            setIsAutomaticEmailEnabled(data.isAutomaticEmailEnabled);
+            localStorage.setItem('attendance_tracker_auto_email_enabled', String(data.isAutomaticEmailEnabled));
+          }
+
+          // Save pulled values to local cache
+          localStorage.setItem('attendance_tracker_participants', JSON.stringify(uniqueParticipants));
+          localStorage.setItem('attendance_tracker_sessions', JSON.stringify(data.sessions));
+          localStorage.setItem('attendance_tracker_records', JSON.stringify(data.attendance));
+
+          setSyncStatus('synced');
+          setHasPendingUnsavedChanges(false);
+          localStorage.setItem('attendance_tracker_unsynced_changes', 'false');
+
+          const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' ' + new Date().toLocaleDateString();
+          setLastSyncTime(nowStr);
+          localStorage.setItem('attendance_tracker_last_sync_time', nowStr);
+          
+          alert("Success! Your device data is fully synced and updated from major cloud SQL records.");
         } else {
-          // If no remote backup exists in Firestore yet, upload local data as initial seed
+          // If no remote backup exists yet, upload local data as initial seed
           alert("No cloud-side database was found yet. Uploading your current browser database as the initial cloud backup standard.");
           await triggerSyncUpload();
         }
       } catch (err: any) {
         console.error("Cloud-first restore download failing:", err);
         setSyncStatus('error');
-        setSyncErrorMsg(err.message || 'Restoration task aborted');
-        alert(`Failed to restore data from cloud: ${err.message}`);
-        
-        try {
-          handleFirestoreError(err, OperationType.GET, docPath);
-        } catch (_) {}
+        setSyncErrorMsg(err.message || 'REST download failed');
+        alert("Failed to restore cloud database: " + err.message);
       }
     }
   };
@@ -672,17 +1031,66 @@ export default function App() {
     registrationNotes: string;
     isValid: boolean;
     errors: string[];
+    warnings?: string[];
     importChecked: boolean;
     idNo?: string;
     age?: string;
     village?: string;
     caregiver?: string;
     gender?: string;
+    schoolingStatus?: string;
+    schoolClass?: string;
   }[]>([]);
+  const [manualHeaderMapping, setManualHeaderMapping] = useState<Record<string, number>>({
+    name: 0,
+    idNo: -1,
+    age: -1,
+    gender: -1,
+    village: -1,
+    caregiver: -1,
+    cohort: -1,
+    contact: -1,
+    notes: -1,
+    schoolingStatus: -1,
+    schoolClass: -1
+  });
+  const [detectedHeadersList, setDetectedHeadersList] = useState<string[]>([]);
+  const [rawCSVRows, setRawCSVRows] = useState<string[][]>([]);
   const [dragActive, setDragActive] = useState(false);
-  const [importTab, setImportTab] = useState<'paste' | 'file'>('paste');
+  const [importTab, setImportTab] = useState<'paste' | 'file' | 'google-forms'>('paste');
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importStrategy, setImportStrategy] = useState<'upsert' | 'create'>('upsert');
+
+  // Google Forms Integration States
+  const [googleFormUrlOrId, setGoogleFormUrlOrId] = useState('');
+  const [googleFormsList, setGoogleFormsList] = useState<{ id: string; name: string }[]>([]);
+  const [selectedGoogleFormId, setSelectedGoogleFormId] = useState('');
+  const [googleFormTitle, setGoogleFormTitle] = useState('');
+  const [googleFormQuestions, setGoogleFormQuestions] = useState<{ questionId: string; title: string; type: string }[]>([]);
+  const [googleFormResponses, setGoogleFormResponses] = useState<any[]>([]);
+  const [googleFormImportMapping, setGoogleFormImportMapping] = useState<Record<string, string>>({
+    name: '',
+    idNo: '',
+    age: '',
+    gender: '',
+    village: '',
+    caregiver: '',
+    cohort: '',
+    contact: '',
+    notes: '',
+    schoolingStatus: '',
+    schoolClass: ''
+  });
+  const [googleFormLoading, setGoogleFormLoading] = useState(false);
+  const [googleFormStatusText, setGoogleFormStatusText] = useState('');
+  const [googleFormError, setGoogleFormError] = useState<string | null>(null);
+
+  // ---- QUICK-LOG ATTENDANCE INTERVENTION STATE ----
+  const [quickLogParticipantId, setQuickLogParticipantId] = useState<string | null>(null);
+  const [quickLogNotes, setQuickLogNotes] = useState('');
+  const [quickLogBy, setQuickLogBy] = useState('');
+  const [quickLogStatus, setQuickLogStatus] = useState<'pending' | 'contacted' | 'resolved'>('contacted');
 
   // ---- CAMERA CAPTURE SYSTEM ----
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -944,10 +1352,27 @@ export default function App() {
     setAiReportLoading(true);
     setAiError(null);
     try {
+      const dateRange = { start: aiReportStartDate, end: aiReportEndDate };
+      
+      let filteredSessions = sessions;
+      if (aiReportStartDate) filteredSessions = filteredSessions.filter(s => s.date >= aiReportStartDate);
+      if (aiReportEndDate) filteredSessions = filteredSessions.filter(s => s.date <= aiReportEndDate);
+      
+      const filteredStats = calculateParticipantStats(participant.id, filteredSessions, attendance);
+
+      // Extract recent session-by-session records for the AI to analyze chronic patterns/trends
+      const attendanceHistory = [...filteredSessions]
+        .sort((a, b) => b.date.localeCompare(a.date))
+        .map(s => ({
+          date: s.date,
+          label: s.label || "Regular Session",
+          status: (attendance[participant.id] || {})[s.date] || 'unmarked'
+        }));
+
       const response = await fetch('/api/gemini/analyze-student', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participant, stats })
+        body: JSON.stringify({ participant, stats: filteredStats, dateRange, attendanceHistory })
       });
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
@@ -977,14 +1402,117 @@ export default function App() {
     }
   };
 
+  const [aiReportStartDate, setAiReportStartDate] = useState('');
+  const [aiReportEndDate, setAiReportEndDate] = useState('');
+
   const generateCohortAIReport = async () => {
     setAiReportLoading(true);
     setAiError(null);
     try {
+      let filteredSessions = sessions;
+      if (aiReportStartDate) filteredSessions = filteredSessions.filter(s => s.date >= aiReportStartDate);
+      if (aiReportEndDate) filteredSessions = filteredSessions.filter(s => s.date <= aiReportEndDate);
+
+      const customStatsMap: Record<string, AttendanceStats> = {};
+      activeParticipants.forEach(p => {
+        customStatsMap[p.id] = calculateParticipantStats(p.id, filteredSessions, attendance);
+      });
+
+      // Compute system-wide stats in detail on client
+      const activeList = activeParticipants;
+      const total = activeList.length;
+      let computedStatsPayload = null;
+      if (total > 0) {
+        const cohortData: Record<string, { count: number; sumAttendance: number; redFlags: number; totalScores: number; countScores: number }> = {};
+        const villageData: Record<string, { count: number; sumAttendance: number; redFlags: number }> = {};
+        const genderData: Record<string, { count: number; sumAttendance: number; redFlags: number; totalScores: number; countScores: number }> = {};
+        const schoolingData: Record<string, { count: number; sumAttendance: number; totalScores: number; countScores: number }> = {};
+
+        activeList.forEach(p => {
+          const stats = customStatsMap[p.id] || { attendanceRate: 100, hasRedFlag: false };
+          const attendanceVal = stats.attendanceRate;
+
+          const schoolForm = p.scannedForms?.find(f => f.formType === 'school')?.extractedData?.school;
+          const scoreVal = schoolForm?.averageScorePercentage;
+
+          const c = p.cohort || 'General';
+          if (!cohortData[c]) cohortData[c] = { count: 0, sumAttendance: 0, redFlags: 0, totalScores: 0, countScores: 0 };
+          cohortData[c].count += 1;
+          cohortData[c].sumAttendance += attendanceVal;
+          if (stats.hasRedFlag) cohortData[c].redFlags += 1;
+          if (typeof scoreVal === 'number') {
+            cohortData[c].totalScores += scoreVal;
+            cohortData[c].countScores += 1;
+          }
+
+          const v = p.village || 'Other';
+          if (!villageData[v]) villageData[v] = { count: 0, sumAttendance: 0, redFlags: 0 };
+          villageData[v].count += 1;
+          villageData[v].sumAttendance += attendanceVal;
+          if (stats.hasRedFlag) villageData[v].redFlags += 1;
+
+          const g = p.gender || 'N/A';
+          if (!genderData[g]) genderData[g] = { count: 0, sumAttendance: 0, redFlags: 0, totalScores: 0, countScores: 0 };
+          genderData[g].count += 1;
+          genderData[g].sumAttendance += attendanceVal;
+          if (stats.hasRedFlag) genderData[g].redFlags += 1;
+          if (typeof scoreVal === 'number') {
+            genderData[g].totalScores += scoreVal;
+            genderData[g].countScores += 1;
+          }
+
+          const s = p.schoolingStatus || 'Not Specified';
+          if (!schoolingData[s]) schoolingData[s] = { count: 0, sumAttendance: 0, totalScores: 0, countScores: 0 };
+          schoolingData[s].count += 1;
+          schoolingData[s].sumAttendance += attendanceVal;
+          if (typeof scoreVal === 'number') {
+            schoolingData[s].totalScores += scoreVal;
+            schoolingData[s].countScores += 1;
+          }
+        });
+
+        computedStatsPayload = {
+          totalParticipants: total,
+          cohortsBreakdown: Object.entries(cohortData).map(([name, d]) => ({
+            cohort: name,
+            count: d.count,
+            averageAttendance: Math.round(d.sumAttendance / d.count),
+            redFlagsCount: d.redFlags,
+            averageAcademicScore: d.countScores > 0 ? Math.round(d.totalScores / d.countScores) : null
+          })),
+          villagesBreakdown: Object.entries(villageData).map(([name, d]) => ({
+            village: name,
+            count: d.count,
+            averageAttendance: Math.round(d.sumAttendance / d.count),
+            redFlagsCount: d.redFlags
+          })),
+          gendersBreakdown: Object.entries(genderData).map(([name, d]) => ({
+            gender: name,
+            count: d.count,
+            averageAttendance: Math.round(d.sumAttendance / d.count),
+            redFlagsCount: d.redFlags,
+            averageAcademicScore: d.countScores > 0 ? Math.round(d.totalScores / d.countScores) : null
+          })),
+          schoolingBreakdown: Object.entries(schoolingData).map(([name, d]) => ({
+            schoolingStatus: name,
+            count: d.count,
+            averageAttendance: Math.round(d.sumAttendance / d.count),
+            averageAcademicScore: d.countScores > 0 ? Math.round(d.totalScores / d.countScores) : null
+          }))
+        };
+      }
+
       const response = await fetch('/api/gemini/analyze-cohort', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participants, statsMap: participantStatsMap })
+        body: JSON.stringify({ 
+          participants: activeParticipants, 
+          statsMap: customStatsMap, 
+          dateRange: { start: aiReportStartDate, end: aiReportEndDate },
+          computedStats: computedStatsPayload,
+          attendance,
+          sessions
+        })
       });
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
@@ -1110,9 +1638,38 @@ export default function App() {
         if (docSnap.exists()) {
           const data = docSnap.data();
           if (Array.isArray(data.participants) && Array.isArray(data.sessions) && typeof data.attendance === 'object') {
-            setParticipants(data.participants);
+            const seen = new Set<string>();
+            const uniqueParticipants = data.participants.filter(p => {
+              if (!p || !p.id || seen.has(p.id)) return false;
+              seen.add(p.id);
+              return true;
+            });
+
+            setParticipants(uniqueParticipants);
             setSessions(data.sessions);
             setAttendance(data.attendance);
+
+            if (Array.isArray(data.emailedSessionDates)) {
+              setEmailedSessionDates(data.emailedSessionDates);
+              localStorage.setItem('attendance_tracker_emailed_session_dates', JSON.stringify(data.emailedSessionDates));
+            }
+            if (Array.isArray(data.dismissedEmailDates)) {
+              setDismissedEmailDates(data.dismissedEmailDates);
+              localStorage.setItem('attendance_tracker_dismissed_email_dates', JSON.stringify(data.dismissedEmailDates));
+            }
+            if (data.lastEmailedSessionDate) {
+              setLastEmailedSessionDate(data.lastEmailedSessionDate);
+              localStorage.setItem('attendance_tracker_last_emailed_session_date', data.lastEmailedSessionDate);
+            }
+            if (data.staffEmailRecipient) {
+              setStaffEmailRecipient(data.staffEmailRecipient);
+              localStorage.setItem('attendance_tracker_staff_email_recipient', data.staffEmailRecipient);
+            }
+            if (typeof data.isAutomaticEmailEnabled === 'boolean') {
+              setIsAutomaticEmailEnabled(data.isAutomaticEmailEnabled);
+              localStorage.setItem('attendance_tracker_auto_email_enabled', String(data.isAutomaticEmailEnabled));
+            }
+
             setSyncStatus('synced');
             setHasPendingUnsavedChanges(false);
             localStorage.setItem('attendance_tracker_unsynced_changes', 'false');
@@ -1127,6 +1684,11 @@ export default function App() {
             participants,
             sessions,
             attendance,
+            emailedSessionDates,
+            dismissedEmailDates,
+            lastEmailedSessionDate,
+            staffEmailRecipient,
+            isAutomaticEmailEnabled,
             lastUpdated: new Date().toISOString()
           };
           await setDoc(docRef, dataToSync);
@@ -1139,9 +1701,17 @@ export default function App() {
           localStorage.setItem('attendance_tracker_last_sync_time', nowStr);
         }
       } catch (err: any) {
-        console.error("Failed to automatically synchronize user records on log in:", err);
-        setSyncStatus('error');
-        setSyncErrorMsg("Cloud database connection lost or restricted");
+        const errMsg = err?.message || '';
+        const isOffline = errMsg.toLowerCase().includes('offline') || !navigator.onLine;
+        
+        if (isOffline) {
+          console.warn("[Firebase Login Sync] Client is offline, bypassing auto-sync and continuing with local state:", err);
+          setSyncStatus('offline');
+        } else {
+          console.error("Failed to automatically synchronize user records on log in:", err);
+          setSyncStatus('error');
+          setSyncErrorMsg("Cloud database connection lost or restricted");
+        }
       }
     };
 
@@ -1198,6 +1768,37 @@ export default function App() {
   // Gather metrics for active and former participants
   const activeParticipants = participants.filter(p => !p.isFormer);
   const formerParticipants = participants.filter(p => !!p.isFormer);
+
+  const uniqueVillages = useMemo(() => {
+    const villagesSet = new Set<string>();
+    activeParticipants.forEach(p => {
+      if (p.village) {
+        const trimmed = p.village.trim();
+        const baseLower = trimmed.toLowerCase();
+        if (
+          trimmed && 
+          trimmed !== '-' && 
+          baseLower !== 'n/a' && 
+          baseLower !== 'na' && 
+          baseLower !== 'none' && 
+          baseLower !== 'null' && 
+          baseLower !== 'undefined' &&
+          baseLower !== 'all villages' &&
+          baseLower !== 'all'
+        ) {
+          const formatted = trimmed
+            .split(/\s+/)
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+            .join(' ');
+          
+          if (formatted) {
+            villagesSet.add(formatted);
+          }
+        }
+      }
+    });
+    return Array.from(villagesSet).sort();
+  }, [activeParticipants]);
 
   // ---- PREPARE MONTHLY REPORT DATA ----
   const uniqueMonths = (() => {
@@ -1456,6 +2057,23 @@ export default function App() {
       return routineCheck || fyCheck;
     });
   }, [activeParticipants]);
+
+  const currentSessionObj = sessions.find(s => s.date === selectedSessionDate) || null;
+  const currentSessionStats = useMemo(() => {
+    if (!currentSessionObj) return null;
+    let present = 0;
+    let absent = 0;
+    let excused = 0;
+    activeParticipants.forEach(p => {
+      const status = attendance[p.id]?.[currentSessionObj.date];
+      if (status === 'present') present++;
+      if (status === 'absent') absent++;
+      if (status === 'excused') excused++;
+    });
+    const total = present + absent + excused;
+    const rate = total > 0 ? Math.round((present / total) * 100) : 0;
+    return { present, absent, excused, rate };
+  }, [currentSessionObj, activeParticipants, attendance]);
   
   // Average program attendance standing
   let sumAvg = 0;
@@ -1483,7 +2101,7 @@ export default function App() {
   const sendOutreachEmailAlert = async (sessionDate: string, force = false) => {
     if (!sessionDate) return;
     
-    if (!force && lastEmailedSessionDate === sessionDate) {
+    if (!force && (lastEmailedSessionDate === sessionDate || emailedSessionDates.includes(sessionDate))) {
       return;
     }
 
@@ -1683,6 +2301,15 @@ export default function App() {
 
       setLastEmailedSessionDate(sessionDate);
       localStorage.setItem('attendance_tracker_last_emailed_session_date', sessionDate);
+      
+      const updatedEmailed = emailedSessionDates.includes(sessionDate) ? emailedSessionDates : [...emailedSessionDates, sessionDate];
+      setEmailedSessionDates(updatedEmailed);
+      localStorage.setItem('attendance_tracker_emailed_session_dates', JSON.stringify(updatedEmailed));
+      
+      // Persist the dispatch state to Firestore securely
+      setTimeout(() => {
+        triggerSyncUpload();
+      }, 100);
       setEmailAlertSuccess(`Successfully dispatched Red/Yellow alert summary email to staff (${staffEmailRecipient}) for Session ${sessionDate}!`);
       
       setTimeout(() => {
@@ -1697,34 +2324,35 @@ export default function App() {
     }
   };
 
-  // Automatically trigger email summary when a session's attendance becomes fully marked
-  useEffect(() => {
-    if (!isAutomaticEmailEnabled || activeParticipants.length === 0 || sessions.length === 0) {
-      return;
-    }
-
-    const pendingSessions = sessions.filter(s => s.date !== lastEmailedSessionDate);
-    if (pendingSessions.length === 0) return;
-
-    // Find if there is any pending session that is fully marked
-    const fullyEnteredSession = pendingSessions.find(s => {
+  // Identify if there's any fully completed session that hasn't been emailed or dismissed yet
+  const firstUnemailedFullyMarkedSession = (() => {
+    if (activeParticipants.length === 0 || sessions.length === 0) return null;
+    
+    // Find all sessions that are completely marked (each active participant status is filled and not unmarked)
+    const completed = sessions.filter(s => {
       return activeParticipants.every(p => {
         const status = attendance[p.id]?.[s.date];
         return status && status !== 'unmarked';
       });
     });
+    
+    // Find first completed session that is NOT emailed AND NOT dismissed
+    return completed.find(s => !emailedSessionDates.includes(s.date) && !dismissedEmailDates.includes(s.date)) || null;
+  })();
 
-    if (fullyEnteredSession && googleAccessToken) {
-      sendOutreachEmailAlert(fullyEnteredSession.date);
-    }
-  }, [
-    sessions, 
-    attendance, 
-    activeParticipants, 
-    isAutomaticEmailEnabled, 
-    lastEmailedSessionDate, 
-    googleAccessToken
-  ]);
+  // Dismiss a complete session from the reminder prompts
+  const dismissEmailAlertPrompt = (sessionDate: string) => {
+    setDismissedEmailDates(prev => {
+      const updated = prev.includes(sessionDate) ? prev : [...prev, sessionDate];
+      localStorage.setItem('attendance_tracker_dismissed_email_dates', JSON.stringify(updated));
+      
+      // Sync dismissed states to Firestore
+      setTimeout(() => {
+        triggerSyncUpload();
+      }, 100);
+      return updated;
+    });
+  };
 
   // Derived state to check matched/unmatched active participants in the pasted attendance list
   const attendanceMatchingDetails = (() => {
@@ -1737,27 +2365,97 @@ export default function App() {
       // Find delimiter (tab, semicolon, or comma)
       const delimiter = line.includes('\t') ? '\t' : (line.includes(';') ? ';' : ',');
       return line.split(delimiter)
-        .map(cell => cell.trim().replace(/^["']|["']$/g, '').trim())
-        .filter(Boolean);
-    }).filter(row => row.length > 0);
+        .map(cell => cell.trim().replace(/^["']|["']$/g, '').trim());
+    }).filter(row => row.some(cell => cell !== ''));
 
     const matchedIds = new Set<string>();
+    if (rows.length === 0) {
+      return { matchedIds, parsedRowsCount: 0 };
+    }
 
+    // Attempt to recognize a header row
+    const firstRowLower = rows[0].map(c => c.toLowerCase());
+    const hasHeader = firstRowLower.some(c => c.includes('status') || c.includes('attendance') || c.includes('id') || c.includes('name'));
+
+    let idColIdx = -1;
+    let nameColIdx = -1;
+    let statusColIdx = -1;
+
+    if (hasHeader) {
+      firstRowLower.forEach((col, idx) => {
+        if (col.includes('id') || col.includes('id no') || col === 'id') {
+          idColIdx = idx;
+        } else if (col.includes('name') || col.includes('student')) {
+          nameColIdx = idx;
+        } else if (col.includes('status') || col.includes('attendance') || col.includes('present')) {
+          statusColIdx = idx;
+        }
+      });
+    }
+
+    // If we have a structured header and can find a status column, perform precise lookup:
+    if (hasHeader && statusColIdx !== -1) {
+      const dataRows = rows.slice(1);
+      
+      activeParticipants.forEach(p => {
+        const matchedRow = dataRows.find(row => {
+          // Try id match
+          if (idColIdx !== -1 && row[idColIdx]) {
+            const rowId = row[idColIdx].toLowerCase();
+            if (p.idNo && p.idNo.toLowerCase() === rowId) return true;
+            if (p.id.toLowerCase() === rowId) return true;
+          }
+          // Try name match
+          if (nameColIdx !== -1 && row[nameColIdx]) {
+            const rowName = row[nameColIdx].toLowerCase();
+            if (p.name.toLowerCase() === rowName) return true;
+            if (rowName.length >= 3 && p.name.toLowerCase().includes(rowName)) return true;
+            if (rowName.length >= 3 && rowName.includes(p.name.toLowerCase())) return true;
+          }
+          // Fallback if neither matches directly or columns aren't quite aligned
+          if (idColIdx === -1 && nameColIdx === -1) {
+            return row.some((cell, cellIdx) => {
+              if (cellIdx === statusColIdx) return false; // don't match on status cell
+              const lowerCell = cell.toLowerCase();
+              if (p.name.toLowerCase() === lowerCell) return true;
+              if (p.contact && p.contact !== '-' && p.contact.toLowerCase() === lowerCell) return true;
+              if (p.idNo && p.idNo !== '-' && p.idNo.toLowerCase() === lowerCell) return true;
+              if (p.id === cell) return true;
+              return false;
+            });
+          }
+          return false;
+        });
+
+        if (matchedRow) {
+          const statusVal = matchedRow[statusColIdx] ? matchedRow[statusColIdx].toLowerCase() : '';
+          const isPresent = statusVal.includes('present') || 
+                            statusVal === 'p' || 
+                            statusVal === '1' || 
+                            statusVal === 'yes' || 
+                            statusVal === 'true' ||
+                            statusVal === 'checked' ||
+                            statusVal === 'attended';
+          if (isPresent) {
+            matchedIds.add(p.id);
+          }
+        }
+      });
+
+      return { matchedIds, parsedRowsCount: dataRows.length };
+    }
+
+    // Fallback: Loose scan/paste list where any mention equals PRESENT
+    const parseRows = hasHeader ? rows.slice(1) : rows;
     activeParticipants.forEach(p => {
-      // Look for a match in any raw row cells
-      const hasMatch = rows.some(row => {
+      const hasMatch = parseRows.some(row => {
         return row.some(cell => {
           const lowerCell = cell.toLowerCase();
-          // Match by name (exact)
           if (p.name.toLowerCase() === lowerCell) return true;
-          // Match by Name (loose word / split if name is long and close)
           if (lowerCell.length >= 3 && p.name.toLowerCase().includes(lowerCell)) return true;
           if (lowerCell.length >= 3 && lowerCell.includes(p.name.toLowerCase())) return true;
-          // Match by contact
           if (p.contact && p.contact !== '-' && p.contact.toLowerCase() === lowerCell) return true;
-          // Match by idNo
           if (p.idNo && p.idNo !== '-' && p.idNo.toLowerCase() === lowerCell) return true;
-          // Match by database id
           if (p.id === cell) return true;
           return false;
         });
@@ -1768,7 +2466,7 @@ export default function App() {
       }
     });
 
-    return { matchedIds, parsedRowsCount: rows.length };
+    return { matchedIds, parsedRowsCount: parseRows.length };
   })();
 
   // ---- COMPUTE SESSIONS ATTENDANCE TREND ----
@@ -1806,6 +2504,109 @@ export default function App() {
         totalStudents: totalMarked,
       };
     });
+
+  // ---- COMPUTE COHORT 7-DAY ROLLING ATTENDANCE TREND ----
+  const cohortRollingTrendData = useMemo(() => {
+    const sorted = [...filteredSessionsForAnalytics].sort((sa, sb) => sa.date.localeCompare(sb.date));
+    
+    const targetCohort = selectedCohort || 'All Cohorts';
+    const cohortParticipants = targetCohort === 'All Cohorts' 
+      ? participants 
+      : participants.filter(p => p.cohort === targetCohort);
+
+    if (cohortParticipants.length === 0 || sorted.length === 0) {
+      return [];
+    }
+
+    return sorted.map((session) => {
+      // Find all session dates within [session.date - 6 days, session.date]
+      const currentDate = new Date(session.date);
+      const startDate = new Date(currentDate);
+      startDate.setDate(startDate.getDate() - 6);
+
+      const sessionsInWindow = sorted.filter(s => {
+        const sDate = new Date(s.date);
+        return sDate >= startDate && sDate <= currentDate;
+      });
+
+      let rollingPresentExcused = 0;
+      let rollingMarked = 0;
+
+      sessionsInWindow.forEach(s => {
+        cohortParticipants.forEach(p => {
+          const status = attendance[p.id]?.[s.date] || 'unmarked';
+          if (status === 'present' || status === 'excused') {
+            rollingPresentExcused++;
+          }
+          if (status === 'present' || status === 'excused' || status === 'absent') {
+            rollingMarked++;
+          }
+        });
+      });
+
+      const rollingAverage = rollingMarked > 0 
+        ? Math.round((rollingPresentExcused / rollingMarked) * 100) 
+        : 0;
+
+      // Calculate single session cohort average as well
+      let singlePresentExcused = 0;
+      let singleMarked = 0;
+      cohortParticipants.forEach(p => {
+        const status = attendance[p.id]?.[session.date] || 'unmarked';
+        if (status === 'present' || status === 'excused') {
+          singlePresentExcused++;
+        }
+        if (status === 'present' || status === 'excused' || status === 'absent') {
+          singleMarked++;
+        }
+      });
+
+      const singleSessionRate = singleMarked > 0 
+        ? Math.round((singlePresentExcused / singleMarked) * 100) 
+        : 0;
+
+      return {
+        date: session.date,
+        shortDate: formatToShortDayMonth(session.date),
+        label: session.label || 'Session',
+        singleSessionRate,
+        rollingAverage,
+        sessionsInWindowCount: sessionsInWindow.length,
+      };
+    });
+  }, [filteredSessionsForAnalytics, participants, attendance, selectedCohort]);
+
+  // ---- CSV DOWNLOAD FOR ROLLING ATTENDANCE TREND ----
+  const handleDownloadRollingCSV = () => {
+    if (cohortRollingTrendData.length === 0) return;
+    
+    const targetCohort = selectedCohort || 'All Cohorts';
+    const csvRows = [
+      ['Date', 'Session Label', 'Daily Session Rate (%)', '7-Day Rolling Average (%)', 'Sessions in Window Count'],
+      ...cohortRollingTrendData.map(item => [
+        item.date,
+        item.label,
+        `${item.singleSessionRate}%`,
+        `${item.rollingAverage}%`,
+        item.sessionsInWindowCount
+      ])
+    ];
+
+    const csvContent = csvRows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    
+    const cleanDate = new Date().toISOString().split('T')[0];
+    const filename = `rolling_attendance_${targetCohort.replace(/\s+/g, '_').toLowerCase()}_${cleanDate}.csv`;
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   // ---- COMPUTE COHORT AVERAGE ATTENDANCE STATS ----
   const cohortComparisonData = (() => {
@@ -1931,6 +2732,34 @@ export default function App() {
     });
   })();
 
+  // Dynamically compute the list of distinct years for filter dropdowns
+  const availableYears = useMemo(() => {
+    const yearsSet = new Set<number>();
+    // Pre-populate standard registration / birth range for defaults
+    const currentYear = new Date().getFullYear();
+    for (let yr = 2012; yr <= currentYear + 1; yr++) {
+      yearsSet.add(yr);
+    }
+    // Gather any other custom years from participants to make sure they are on the list
+    participants.forEach(p => {
+      if (p.joinDate) {
+        const joinYear = parseInt(p.joinDate.split('-')[0], 10);
+        if (!isNaN(joinYear) && joinYear > 1900) yearsSet.add(joinYear);
+      }
+      if (p.dob) {
+        const dobYear = parseInt(p.dob.split('-')[0], 10);
+        if (!isNaN(dobYear) && dobYear > 1900) yearsSet.add(dobYear);
+      }
+    });
+    return Array.from(yearsSet).sort((a, b) => b - a); // descending order
+  }, [participants]);
+
+  // Derived active age bracket ID if custom selection matches one of the presets
+  const derivedAgeBracket = useMemo(() => {
+    const match = AGE_BRACKETS.find(b => b.min === filterAgeStart && b.max === filterAgeEnd);
+    return match ? match.id : (filterAgeStart || filterAgeEnd ? 'custom' : 'all');
+  }, [filterAgeStart, filterAgeEnd]);
+
   // ---- FILTERING LOGIC ----
   const filteredParticipants = activeParticipants.filter(part => {
     const matchesSearch = 
@@ -1939,6 +2768,20 @@ export default function App() {
       part.contact.toLowerCase().includes(searchQuery.toLowerCase());
     
     const matchesCohort = selectedCohort === 'All Cohorts' || part.cohort === selectedCohort;
+    const matchesVillage = (() => {
+      if (selectedVillage === 'All Villages') return true;
+      if (!part.village) return false;
+      const vTrimmed = part.village.trim();
+      const formatted = vTrimmed
+        .split(/\s+/)
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ');
+      return formatted === selectedVillage;
+    })();
+    const matchesSchoolingStatus = selectedSchoolingStatus === 'All' || part.schoolingStatus === selectedSchoolingStatus;
+    const matchesSchoolClass = selectedSchoolClass === 'All' 
+                            || (part.schoolClass ? part.schoolClass.toLowerCase().includes(selectedSchoolClass.toLowerCase()) : false)
+                            || (selectedSchoolClass === 'Unassigned' && (!part.schoolClass || part.schoolClass === ''));
     
     let matchesSegment = true;
     if (selectedSegment !== 'all') {
@@ -1965,6 +2808,43 @@ export default function App() {
       }
     }
 
+    const matchesYearRange = (() => {
+      if (!filterYearStart && !filterYearEnd) return true;
+      let yr = NaN;
+      if (filterYearType === 'join') {
+        if (part.joinDate) {
+          yr = parseInt(part.joinDate.split('-')[0], 10);
+        }
+      } else if (filterYearType === 'dob') {
+        if (part.dob) {
+          yr = parseInt(part.dob.split('-')[0], 10);
+        } else if (part.age) {
+          const parsedAge = parseInt(part.age, 10);
+          if (!isNaN(parsedAge)) {
+            yr = new Date().getFullYear() - parsedAge;
+          }
+        }
+      }
+      
+      if (isNaN(yr)) return false;
+      
+      const start = filterYearStart ? parseInt(filterYearStart, 10) : -Infinity;
+      const end = filterYearEnd ? parseInt(filterYearEnd, 10) : Infinity;
+      
+      // Check if within bounds (inclusive)
+      return yr >= start && yr <= end;
+    })();
+
+    const matchesAgeRange = (() => {
+      if (!filterAgeStart && !filterAgeEnd) return true;
+      const ageStr = part.dob ? calculateAgeFromDob(part.dob) : part.age;
+      const ageNum = ageStr ? parseInt(ageStr, 10) : NaN;
+      if (isNaN(ageNum)) return false;
+      const start = filterAgeStart ? parseInt(filterAgeStart, 10) : -Infinity;
+      const end = filterAgeEnd ? parseInt(filterAgeEnd, 10) : Infinity;
+      return ageNum >= start && ageNum <= end;
+    })();
+
     const stats = getDashboardStats(part.id);
     let matchesFlag = true;
     if (selectedFlag === 'red') {
@@ -1977,7 +2857,7 @@ export default function App() {
       matchesFlag = dueCheckInParticipantsList.some(dp => dp.id === part.id);
     }
 
-    return matchesSearch && matchesCohort && matchesSegment && matchesFlag;
+    return matchesSearch && matchesCohort && matchesVillage && matchesSegment && matchesFlag && matchesSchoolingStatus && matchesSchoolClass && matchesYearRange && matchesAgeRange;
   }).sort((a, b) => {
     const statsA = getDashboardStats(a.id);
     const statsB = getDashboardStats(b.id);
@@ -2015,9 +2895,19 @@ export default function App() {
   
   // Cyclic toggling of attendance for cell clicking
   const toggleAttendanceStatus = (participantId: string, dateStr: string) => {
+    if (!isAdminMode) {
+      alert("Oops! Accidental alteration prevented. Please unlock Admin Mode to edit attendance markings.");
+      return;
+    }
+    const student = participants.find(p => p.id === participantId);
+    const studentName = student ? student.name : 'Candidate';
+    let targetOld: AttendanceStatus = 'unmarked';
+    let targetNext: AttendanceStatus = 'present';
+
     setAttendance(prev => {
       const currentRecord = prev[participantId] || {};
       const currentStatusValue: AttendanceStatus = currentRecord[dateStr] || 'unmarked';
+      targetOld = currentStatusValue;
       
       let nextStatus: AttendanceStatus = 'present';
       if (currentStatusValue === 'present') {
@@ -2029,6 +2919,7 @@ export default function App() {
       } else {
         nextStatus = 'present';
       }
+      targetNext = nextStatus;
 
       return {
         ...prev,
@@ -2038,12 +2929,28 @@ export default function App() {
         }
       };
     });
+    const opTrace = operatorName.trim() ? `${operatorName.trim()} (Admin)` : 'Unlocked Administrator';
+    logSystemAction(
+      'audit',
+      'Attendance Manually Altered',
+      `Manual toggle for student "${studentName}" on session ${dateStr}: changed status from ${targetOld.toUpperCase()} to ${targetNext.toUpperCase()}.`,
+      opTrace
+    );
   };
 
   // Specific assignment function for dropdown/select switching
   const setSpecificAttendance = (participantId: string, dateStr: string, status: AttendanceStatus) => {
+    if (!isAdminMode) {
+      alert("Oops! Accidental alteration prevented. Please unlock Admin Mode to edit attendance markings.");
+      return;
+    }
+    const student = participants.find(p => p.id === participantId);
+    const studentName = student ? student.name : 'Candidate';
+    let targetOld: AttendanceStatus = 'unmarked';
+
     setAttendance(prev => {
       const currentRecord = prev[participantId] || {};
+      targetOld = currentRecord[dateStr] || 'unmarked';
       return {
         ...prev,
         [participantId]: {
@@ -2052,10 +2959,21 @@ export default function App() {
         }
       };
     });
+    const opTrace = operatorName.trim() ? `${operatorName.trim()} (Admin)` : 'Unlocked Administrator';
+    logSystemAction(
+      'audit',
+      'Attendance Manually Altered',
+      `Manual change for student "${studentName}" on session ${dateStr}: explicitly assigned status ${status.toUpperCase()} (was ${targetOld.toUpperCase()}).`,
+      opTrace
+    );
   };
 
   // Bulk set attendance for all displayed participants
   const handleBulkSetAttendance = (status: 'present' | 'absent') => {
+    if (!isAdminMode) {
+      alert("Oops! Please unlock Admin Mode first to perform bulk session modifications.");
+      return;
+    }
     const targetDate = bulkTargetDate || (sessions[0]?.date || '');
     if (!targetDate) {
       alert("No active sessions exist yet. Please add a session date first before performing bulk updates.");
@@ -2090,6 +3008,13 @@ export default function App() {
 
       return updated;
     });
+    const opTrace = operatorName.trim() ? `${operatorName.trim()} (Admin)` : 'Unlocked Administrator';
+    logSystemAction(
+      'audit',
+      'Bulk Attendance Altered',
+      `Batch overwrite applied to all ${filteredParticipants.length} students: forced status to ${status.toUpperCase()} for session ${targetDate}.`,
+      opTrace
+    );
   };
 
   // Safe adding of active participant
@@ -2115,10 +3040,13 @@ export default function App() {
       dob: newPartDob.trim() || undefined,
       village: newPartVillage.trim() || '-',
       caregiver: newPartCaregiver.trim() || '-',
-      gender: newPartGender.trim() || '-'
+      gender: newPartGender.trim() || '-',
+      schoolingStatus: newPartSchoolingStatus.trim() || 'Day Scholar',
+      schoolClass: newPartSchoolClass.trim() || '-',
     };
 
     setParticipants(prev => [...prev, newParticipant]);
+    logSystemAction('transaction', 'Student Registered', `Enrolled participant [${newParticipant.name}] (ID: ${newParticipant.idNo}) into cohort group "${newParticipant.cohort}".`);
     
     // Pre-populate unmarked attendance for previous dates
     setAttendance(prev => {
@@ -2141,6 +3069,8 @@ export default function App() {
     setNewPartCaregiver('');
     setNewPartContact('');
     setNewPartGender('');
+    setNewPartSchoolingStatus('Day Scholar');
+    setNewPartSchoolClass('');
     setNewPartNotes('');
     setIsAddParticipantOpen(false);
   };
@@ -2189,7 +3119,7 @@ export default function App() {
     if (!selectedParticipantId || !newLogNotes.trim()) return;
 
     const newLog: OutreachLog = {
-      id: `l_${Date.now()}`,
+      id: `l_${Date.now()}_${Math.floor(Math.random() * 1000000)}`,
       date: new Date().toISOString().split('T')[0],
       status: newLogStatus,
       notes: newLogNotes.trim(),
@@ -2208,6 +3138,35 @@ export default function App() {
 
     setNewLogNotes('');
     setNewLoggedBy('');
+  };
+
+  // Quick Action Low Attendance Outreach Logging
+  const handleQuickLogSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!quickLogParticipantId || !quickLogNotes.trim()) return;
+
+    const newLog: OutreachLog = {
+      id: `l_ql_${Date.now()}_${Math.floor(Math.random() * 1000000)}`,
+      date: new Date().toISOString().split('T')[0],
+      status: quickLogStatus,
+      notes: quickLogNotes.trim(),
+      loggedBy: quickLogBy.trim() || 'Staff/Educator (Quick)'
+    };
+
+    setParticipants(prev => prev.map(p => {
+      if (p.id === quickLogParticipantId) {
+        return {
+          ...p,
+          outreachNotes: [newLog, ...(p.outreachNotes || [])]
+        };
+      }
+      return p;
+    }));
+
+    setQuickLogParticipantId(null);
+    setQuickLogNotes('');
+    setQuickLogBy('');
+    setQuickLogStatus('contacted');
   };
 
   // Delete an outreach note
@@ -2238,10 +3197,423 @@ export default function App() {
     }));
   };
 
+  // Helper to find a matching participant
+  const findMatchingParticipant = (pData: { name: string; idNo?: string; contact?: string }) => {
+    const normName = pData.name ? pData.name.trim().toLowerCase() : '';
+    const normId = pData.idNo && pData.idNo !== '-' && pData.idNo !== '' ? pData.idNo.trim().toLowerCase() : '';
+    const normPhone = pData.contact && pData.contact !== '-' && pData.contact !== '' ? pData.contact.trim().toLowerCase() : '';
+
+    return participants.find(p => {
+      if (normId && p.idNo && p.idNo !== '-' && p.idNo.trim().toLowerCase() === normId) {
+        return true;
+      }
+      if (normPhone && p.contact && p.contact !== '-' && p.contact.trim().toLowerCase() === normPhone) {
+        return true;
+      }
+      if (normName && p.name && p.name.trim().toLowerCase() === normName) {
+        return true;
+      }
+      return false;
+    });
+  };
+
+  // Google Forms Integration Handlers
+  const extractGoogleFormId = (input: string) => {
+    const trimmed = input.trim();
+    if (!trimmed) return '';
+    if (trimmed.includes('docs.google.com/forms')) {
+      const match = trimmed.match(/\/forms\/d\/(e\/)?([^/]+)/);
+      if (match && match[2]) {
+        return match[2];
+      }
+    }
+    return trimmed;
+  };
+
+  const handleBrowseGoogleForms = async (customToken?: string) => {
+    setGoogleFormLoading(true);
+    setGoogleFormError(null);
+    setGoogleFormStatusText('Browsing form files in your Google Drive...');
+    try {
+      let token = customToken || googleAccessToken;
+      if (!token) {
+        const result = await signInWithPopup(auth, googleProvider);
+        const credential = GoogleAuthProvider.credentialFromResult(result);
+        token = credential?.accessToken || null;
+        if (token) {
+          setGoogleAccessToken(token);
+        } else {
+          throw new Error("Unable to obtain authorization token.");
+        }
+      }
+
+      const response = await fetch(
+        "https://www.googleapis.com/drive/v3/files?q=mimeType='application/vnd.google-apps.form'&orderBy=modifiedTime desc&pageSize=50",
+         {
+           headers: {
+             Authorization: `Bearer ${token}`
+           }
+         }
+      );
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          setGoogleAccessToken(null);
+          throw new Error("Google access expired. Please sign in again.");
+        }
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error?.message || `Drive service returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const files = (data.files || []).map((f: any) => ({
+        id: f.id,
+        name: f.name || 'Untitled Google Form'
+      }));
+      setGoogleFormsList(files);
+      setGoogleFormStatusText(`Successfully retrieved ${files.length} Forms from Google Drive.`);
+    } catch (err: any) {
+      console.error("Browse forms error:", err);
+      setGoogleFormError(err.message || 'Unknown error while listing Google Forms.');
+    } finally {
+      setGoogleFormLoading(false);
+    }
+  };
+
+  const handleFetchGoogleFormStructureAndResponses = async (rawFormIdOrUrl: string, customToken?: string) => {
+    const formId = extractGoogleFormId(rawFormIdOrUrl);
+    if (!formId) {
+      setGoogleFormError("Please enter or select a valid Google Form ID or Google Form URL.");
+      return;
+    }
+    setGoogleFormLoading(true);
+    setGoogleFormError(null);
+    setGoogleFormStatusText('Fetching Form structure and query schemas...');
+    try {
+      let token = customToken || googleAccessToken;
+      if (!token) {
+        const result = await signInWithPopup(auth, googleProvider);
+        const credential = GoogleAuthProvider.credentialFromResult(result);
+        token = credential?.accessToken || null;
+        if (token) {
+          setGoogleAccessToken(token);
+        } else {
+          throw new Error("Unable to obtain Google Form authentication token.");
+        }
+      }
+
+      // 1. Fetch Form Structure
+      const schemaRes = await fetch(`https://forms.googleapis.com/v1/forms/${formId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!schemaRes.ok) {
+        const errData = await schemaRes.json().catch(() => ({}));
+        throw new Error(errData.error?.message || `Failed to fetch form details (Status ${schemaRes.status}). Verify Form ID and permissions.`);
+      }
+
+      const schemaData = await schemaRes.json();
+      setGoogleFormTitle(schemaData.info?.title || schemaData.info?.documentTitle || 'Untitled Form');
+
+      // Parse questions
+      const questions: any[] = [];
+      if (schemaData.items && Array.isArray(schemaData.items)) {
+        schemaData.items.forEach((item: any) => {
+          if (item.questionItem && item.questionItem.question) {
+            const q = item.questionItem.question;
+            questions.push({
+              questionId: q.questionId,
+              title: item.title || q.title || `Question ID: ${q.questionId}`,
+              type: q.textQuestion ? 'text' : q.choiceQuestion ? 'choice' : 'other'
+            });
+          } else if (item.questionGroupItem && Array.isArray(item.questionGroupItem.questions)) {
+            item.questionGroupItem.questions.forEach((q: any) => {
+              questions.push({
+                questionId: q.questionId,
+                title: `${item.title || ''} - ${q.title || `Question ID: ${q.questionId}`}`.trim(),
+                type: q.textQuestion ? 'text' : q.choiceQuestion ? 'choice' : 'other'
+              });
+            });
+          }
+        });
+      }
+
+      setGoogleFormQuestions(questions);
+
+      // Guess Auto-Mapping based on field name matches
+      const autoMapping = {
+        name: '',
+        idNo: '',
+        age: '',
+        gender: '',
+        village: '',
+        caregiver: '',
+        cohort: '',
+        contact: '',
+        notes: '',
+        schoolingStatus: '',
+        schoolClass: ''
+      };
+      
+      questions.forEach(q => {
+        const text = q.title.toLowerCase();
+        if (text.includes('name') || text.includes('full name') || text.includes('jina') || text.includes('mwanafunzi')) {
+          if (!autoMapping.name) autoMapping.name = q.questionId;
+        } else if (text.includes('id no') || text.includes('id number') || text.includes('national id') || text.includes('namba ya kitambulisho')) {
+          if (!autoMapping.idNo) autoMapping.idNo = q.questionId;
+        } else if (text.includes('age') || text.includes('miaka') || text.includes('years old')) {
+          if (!autoMapping.age) autoMapping.age = q.questionId;
+        } else if (text.includes('gender') || text.includes('jinsia') || text.includes('sex')) {
+          if (!autoMapping.gender) autoMapping.gender = q.questionId;
+        } else if (text.includes('village') || text.includes('kijiji') || text.includes('location') || text.includes('home')) {
+          if (!autoMapping.village) autoMapping.village = q.questionId;
+        } else if (text.includes('caregiver') || text.includes('parent') || text.includes('guardian') || text.includes('mlezi') || text.includes('mzazi')) {
+          if (!autoMapping.caregiver) autoMapping.caregiver = q.questionId;
+        } else if (text.includes('boarding') || text.includes('school status') || text.includes('schooling') || text.includes('day')) {
+          if (!autoMapping.schoolingStatus) autoMapping.schoolingStatus = q.questionId;
+        } else if (text.includes('class') || text.includes('grade') || text.includes('form') || text.includes('standard')) {
+          if (!autoMapping.schoolClass) autoMapping.schoolClass = q.questionId;
+        } else if (text.includes('cohort') || text.includes('course') || text.includes('kikundi')) {
+          if (!autoMapping.cohort) autoMapping.cohort = q.questionId;
+        } else if (text.includes('contact') || text.includes('phone') || text.includes('simu') || text.includes('nambari') || text.includes('email') || text.includes('baruapepe')) {
+          if (!autoMapping.contact) autoMapping.contact = q.questionId;
+        } else if (text.includes('notes') || text.includes('diet') || text.includes('allergy') || text.includes('comment') || text.includes('remarks')) {
+          if (!autoMapping.notes) autoMapping.notes = q.questionId;
+        }
+      });
+      setGoogleFormImportMapping(autoMapping);
+
+      // 2. Fetch Form Responses
+      setGoogleFormStatusText('Fetching responses from Google Form...');
+      const responseRes = await fetch(`https://forms.googleapis.com/v1/forms/${formId}/responses`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!responseRes.ok) {
+        if (responseRes.status === 404 || responseRes.status === 403) {
+          throw new Error("Form is not accepting responses or access is restricted. Make sure responses are enabled and you have permission.");
+        }
+        const errData = await responseRes.json().catch(() => ({}));
+        throw new Error(errData.error?.message || `Failed to fetch responses (Status ${responseRes.status})`);
+      }
+
+      const responseData = await responseRes.json();
+      const responsesList = responseData.responses || [];
+      setGoogleFormResponses(responsesList);
+      setGoogleFormStatusText(`Successfully retrieved Form layout with ${questions.length} fields and ${responsesList.length} total responses.`);
+    } catch (err: any) {
+      console.error("Fetch form structure and responses error:", err);
+      setGoogleFormError(err.message || "An error occurred while connecting to Google Forms.");
+    } finally {
+      setGoogleFormLoading(false);
+    }
+  };
+
+  const applyGoogleFormMapping = () => {
+    if (!googleFormResponses || googleFormResponses.length === 0) {
+      setGoogleFormError("No Google Form responses found to map.");
+      return;
+    }
+
+    const nameQId = googleFormImportMapping.name;
+    if (!nameQId) {
+      setGoogleFormError("Please configure the 'Full Name' field mapping before attempting to preview form responses.");
+      return;
+    }
+
+    const candidates = googleFormResponses.map((resp: any, idx: number) => {
+      const getAnswerText = (qId: string) => {
+        if (!qId || !resp.answers) return '-';
+        const answerObj = resp.answers[qId];
+        if (!answerObj || !answerObj.textAnswers || !answerObj.textAnswers.answers) return '-';
+        return answerObj.textAnswers.answers.map((a: any) => a.value).join(', ');
+      };
+
+      const name = getAnswerText(nameQId).trim();
+      const idNo = getAnswerText(googleFormImportMapping.idNo).trim();
+      const age = getAnswerText(googleFormImportMapping.age).trim();
+      const gender = getAnswerText(googleFormImportMapping.gender).trim();
+      const village = getAnswerText(googleFormImportMapping.village).trim();
+      const caregiver = getAnswerText(googleFormImportMapping.caregiver).trim();
+      
+      const rawCohort = getAnswerText(googleFormImportMapping.cohort).trim();
+      const cohort = COHORTS.includes(rawCohort) ? rawCohort : 'Victors Class';
+
+      const contact = getAnswerText(googleFormImportMapping.contact).trim();
+      const notes = getAnswerText(googleFormImportMapping.notes).trim();
+      const schoolingStatus = getAnswerText(googleFormImportMapping.schoolingStatus).trim();
+      const schoolClass = getAnswerText(googleFormImportMapping.schoolClass).trim();
+
+      return {
+        id: `form_${resp.responseId || idx}_${Date.now()}`,
+        name: name !== '-' ? name : '',
+        idNo: idNo || '-',
+        age: age || '-',
+        gender: gender || '-',
+        village: village || '-',
+        caregiver: caregiver || '-',
+        cohort,
+        contact: contact || '-',
+        schoolingStatus: schoolingStatus || '-',
+        schoolClass: schoolClass || '-',
+        registrationNotes: notes !== '-' ? notes : `Imported via Google Form response.`,
+        isValid: true,
+        errors: [],
+        warnings: [],
+        importChecked: true
+      };
+    });
+
+    const evaluated = reevaluateParsedImportList(candidates, importStrategy);
+    setParsedImportList(evaluated);
+    setGoogleFormError(null);
+  };
+
+  // Helper code to map dynamic evaluation details on imported candidates
+  const reevaluateParsedImportList = (items: any[], strategy: 'upsert' | 'create') => {
+    return items.map(item => {
+      const name = item.name || '';
+      const idNo = item.idNo || '';
+      const contact = item.contact || '';
+
+      const errs: string[] = [];
+      const warnings: string[] = [];
+      let matchType: 'none' | 'update' = 'none';
+      let matchedParticipantId: string | undefined = undefined;
+      let matchedParticipantName: string | undefined = undefined;
+
+      const matchedStudent = findMatchingParticipant({ name, idNo, contact });
+      if (matchedStudent) {
+        matchType = 'update';
+        matchedParticipantId = matchedStudent.id;
+        matchedParticipantName = matchedStudent.name;
+      }
+
+      if (!name) {
+        errs.push('Missing Name');
+      }
+
+      if (strategy === 'create') {
+        if (name) {
+          const similarPart = participants.find(p => p.name.trim().toLowerCase() === name.toLowerCase());
+          if (similarPart) {
+            warnings.push(`Similar/Match Name: Already matched with registered student "${similarPart.name}" (${similarPart.cohort})`);
+          }
+        }
+        if (idNo && idNo !== '-' && idNo !== '') {
+          const idMatch = participants.find(p => p.idNo && p.idNo !== '-' && p.idNo.trim().toLowerCase() === idNo.toLowerCase());
+          if (idMatch) {
+            errs.push(`ID Number Conflict: Matches registered student "${idMatch.name}" (${idMatch.idNo})`);
+          }
+        }
+        if (contact && contact !== '-' && contact !== '') {
+          const phoneMatch = participants.find(p => p.contact && p.contact !== '-' && p.contact.trim().toLowerCase() === contact.toLowerCase());
+          if (phoneMatch) {
+            warnings.push(`Duplicate Contact: Shared contact with enrolled student "${phoneMatch.name}"`);
+          }
+        }
+      } else {
+        // Upsert strategy
+        if (matchedStudent) {
+          warnings.push(`Profile Match: Will update profile of existing participant "${matchedStudent.name}" (${matchedStudent.cohort}) with new class, contact, and details.`);
+        }
+      }
+
+      return {
+        ...item,
+        isValid: errs.length === 0,
+        errors: errs,
+        warnings,
+        matchType,
+        matchedParticipantId,
+        matchedParticipantName,
+        importChecked: errs.length === 0 ? item.importChecked : false
+      };
+    });
+  };
+
+  useEffect(() => {
+    if (parsedImportList.length > 0) {
+      setParsedImportList(prev => {
+        const reevaluated = reevaluateParsedImportList(prev, importStrategy);
+        let changed = false;
+        if (reevaluated.length !== prev.length) {
+          changed = true;
+        } else {
+          for (let i = 0; i < prev.length; i++) {
+            if (prev[i].isValid !== reevaluated[i].isValid ||
+                prev[i].importChecked !== reevaluated[i].importChecked ||
+                prev[i].errors.join(",") !== reevaluated[i].errors.join(",") ||
+                (prev[i].warnings || []).join(",") !== (reevaluated[i].warnings || []).join(",")) {
+              changed = true;
+              break;
+            }
+          }
+        }
+        return changed ? reevaluated : prev;
+      });
+    }
+  }, [importStrategy]);
+
+  // Reactive mapper for spreadsheet raw rows with extensive validation & data safety conflict checks
+  const applyMappingOnRawRows = (rows: string[][], mapping: Record<string, number>) => {
+    const parsedData: any[] = [];
+    
+    for (let i = 0; i < rows.length; i++) {
+       const columns = rows[i];
+       if (columns.length === 0 || (columns.length === 1 && !columns[0])) continue;
+
+       const name = mapping.name !== -1 && columns[mapping.name] ? columns[mapping.name].replace(/^["']|["']$/g, '').trim() : '';
+       const idNo = mapping.idNo !== -1 && columns[mapping.idNo] ? columns[mapping.idNo].replace(/^["']|["']$/g, '').trim() : '';
+       const age = mapping.age !== -1 && columns[mapping.age] ? columns[mapping.age].replace(/^["']|["']$/g, '').trim() : '';
+       const gender = mapping.gender !== -1 && columns[mapping.gender] ? columns[mapping.gender].replace(/^["']|["']$/g, '').trim() : '';
+       const village = mapping.village !== -1 && columns[mapping.village] ? columns[mapping.village].replace(/^["']|["']$/g, '').trim() : '';
+       const caregiver = mapping.caregiver !== -1 && columns[mapping.caregiver] ? columns[mapping.caregiver].replace(/^["']|["']$/g, '').trim() : '';
+       const rawCohort = mapping.cohort !== -1 && columns[mapping.cohort] ? columns[mapping.cohort].replace(/^["']|["']$/g, '').trim() : '';
+       const rawContact = mapping.contact !== -1 && columns[mapping.contact] ? columns[mapping.contact].replace(/^["']|["']$/g, '').trim() : '';
+       const notes = mapping.notes !== -1 && columns[mapping.notes] ? columns[mapping.notes].replace(/^["']|["']$/g, '').trim() : '';
+       const schoolingStatus = mapping.schoolingStatus !== -1 && columns[mapping.schoolingStatus] ? columns[mapping.schoolingStatus].replace(/^["']|["']$/g, '').trim() : '';
+       const schoolClass = mapping.schoolClass !== -1 && columns[mapping.schoolClass] ? columns[mapping.schoolClass].replace(/^["']|["']$/g, '').trim() : '';
+
+       const contact = rawContact || '-';
+       const cohort = COHORTS.includes(rawCohort) ? rawCohort : 'Victors Class';
+
+       parsedData.push({
+         id: `temp_${i}_${Date.now()}`,
+         name,
+         contact,
+         cohort,
+         registrationNotes: notes || 'Imported via spreadsheet preview mapper.',
+         isValid: true,
+         errors: [],
+         warnings: [],
+         importChecked: true,
+         idNo: idNo || '-',
+         age: age || '-',
+         gender: gender || '-',
+         village: village || '-',
+         caregiver: caregiver || '-',
+         schoolingStatus: schoolingStatus || '-',
+         schoolClass: schoolClass || '-'
+       });
+    }
+
+    const evaluated = reevaluateParsedImportList(parsedData, importStrategy);
+    setParsedImportList(evaluated);
+  };
+
+  const updateHeaderMapping = (field: string, colIdx: number) => {
+    const updated = { ...manualHeaderMapping, [field]: colIdx };
+    setManualHeaderMapping(updated);
+    applyMappingOnRawRows(rawCSVRows, updated);
+  };
+
   // Parser for raw pasted / uploaded text (JSON or CSV format)
   const parseRawText = (text: string) => {
     if (!text.trim()) {
       setParsedImportList([]);
+      setRawCSVRows([]);
+      setDetectedHeadersList([]);
       setImportError(null);
       return;
     }
@@ -2252,7 +3624,7 @@ export default function App() {
       if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
         const json = JSON.parse(trimmed);
         if (Array.isArray(json)) {
-          const parsed = json.map((item: any, idx) => {
+          const parsedTemp = json.map((item: any, idx) => {
             const name = String(item.name || item.Name || '').trim();
             const contactInput = String(item.contact || item.Contact || item.phone || item.Phone || item.email || item.Email || '').trim();
             const cohort = String(item.cohort || item.Cohort || 'Victors Class').trim();
@@ -2263,15 +3635,10 @@ export default function App() {
             const gender = String(item.gender || item.Gender || item.sex || item.Sex || '').trim();
             const village = String(item.village || item.Village || '').trim();
             const caregiver = String(item.caregiver || item.Caregiver || '').trim();
+            const schoolingStatus = String(item.schoolingStatus || item.school_status || item['school status'] || item.schooling_status || item['Schooling Status'] || '').trim();
+            const schoolClass = String(item.schoolClass || item.school_class || item['school class'] || item['School Class'] || item.grade || item['Grade'] || '').trim();
 
             const contact = contactInput || '-';
-
-            const errs: string[] = [];
-            if (!name) errs.push('Missing Name');
-            
-            if (contact && contact !== '-' && participants.some(p => p.contact.toLowerCase() === contact.toLowerCase())) {
-              errs.push('Duplicate Contact');
-            }
 
             return {
               id: `temp_${idx}_${Date.now()}`,
@@ -2279,17 +3646,22 @@ export default function App() {
               contact,
               cohort: COHORTS.includes(cohort) ? cohort : 'Victors Class',
               registrationNotes: notes || 'Imported via JSON.',
-              isValid: errs.length === 0,
-              errors: errs,
-              importChecked: errs.length === 0,
+              isValid: true,
+              errors: [],
+              warnings: [],
+              importChecked: true,
               idNo: idNo || '-',
               age: age || '-',
               gender: gender || '-',
               village: village || '-',
-              caregiver: caregiver || '-'
+              caregiver: caregiver || '-',
+              schoolingStatus: schoolingStatus || '-',
+              schoolClass: schoolClass || '-'
             };
           });
-          setParsedImportList(parsed);
+
+          const evaluated = reevaluateParsedImportList(parsedTemp, importStrategy);
+          setParsedImportList(evaluated);
           setImportError(null);
           return;
         }
@@ -2299,85 +3671,84 @@ export default function App() {
     }
 
     // CSV/TSV / Semicolon / Pipe parsing
-    const lines = text.split(/\r?\n/);
-    const parsedData: any[] = [];
-    let detectedHeaders = false;
-    let headerIndexMap = { name: 0, idNo: -1, age: -1, gender: -1, village: -1, caregiver: -1, cohort: -1, contact: -1, notes: -1 };
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l !== '');
+    if (lines.length === 0) return;
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
+    let delimiter = ',';
+    const firstLine = lines[0];
+    if (firstLine.includes('\t')) delimiter = '\t';
+    else if (firstLine.includes(';')) delimiter = ';';
+    else if (firstLine.includes('|')) delimiter = '|';
 
-      let delimiter = ',';
-      if (line.includes('\t')) delimiter = '\t';
-      else if (line.includes(';')) delimiter = ';';
-      else if (line.includes('|')) delimiter = '|';
+    const firstLineColumns = firstLine.split(delimiter).map(c => c.replace(/^["']|["']$/g, '').trim());
 
-      const columns = line.split(delimiter).map(c => c.replace(/^["']|["']$/g, '').trim());
+    // Identify if the row is actually a header row
+    const isHeaderRow = firstLineColumns.some(col => 
+      ['name', 'fullname', 'contact', 'phone', 'email', 'cohort', 'notes', 'notes/dietary', 'id no.', 'id no', 'age', 'gender', 'sex', 'village', 'caregiver', 'schooling status', 'school class', 'class', 'grade'].includes(col.toLowerCase().trim())
+    );
 
-      // Identify if the row is actually a header row
-      const isHeaderRow = i === 0 && columns.some(col => 
-        ['name', 'fullname', 'contact', 'phone', 'email', 'cohort', 'notes', 'notes/dietary', 'id no.', 'id no', 'age', 'gender', 'sex', 'village', 'caregiver'].includes(col.toLowerCase().trim())
-      );
+    let rawHeaders: string[] = [];
+    let dataRowsStr: string[][] = [];
+    let initialMapping: Record<string, number> = {
+      name: 0,
+      idNo: -1,
+      age: -1,
+      gender: -1,
+      village: -1,
+      caregiver: -1,
+      cohort: -1,
+      contact: -1,
+      notes: -1,
+      schoolingStatus: -1,
+      schoolClass: -1
+    };
 
-      if (isHeaderRow) {
-        detectedHeaders = true;
-        columns.forEach((col, idx) => {
-          const lCol = col.toLowerCase().trim();
-          if (lCol.includes('name')) headerIndexMap.name = idx;
-          if (lCol.includes('contact') || lCol.includes('phone') || lCol.includes('email')) headerIndexMap.contact = idx;
-          if (lCol.includes('cohort')) headerIndexMap.cohort = idx;
-          if (lCol.includes('note')) headerIndexMap.notes = idx;
-          if (lCol.includes('id no') || lCol.includes('id number') || lCol === 'id') headerIndexMap.idNo = idx;
-          if (lCol === 'age') headerIndexMap.age = idx;
-          if (lCol === 'gender' || lCol === 'sex') headerIndexMap.gender = idx;
-          if (lCol === 'village') headerIndexMap.village = idx;
-          if (lCol === 'caregiver') headerIndexMap.caregiver = idx;
-        });
-        continue;
-      }
-
-      // Default order mapping if no header is detected: Name, ID No., Age, Gender, Village, Caregiver, Cohort, Contact, Notes
-      const name = columns[headerIndexMap.name] || (headerIndexMap.name === 0 || !detectedHeaders ? columns[0] : '') || '';
-      const rawContact = headerIndexMap.contact !== -1 ? (columns[headerIndexMap.contact] || '') : (detectedHeaders ? '' : (columns[7] || ''));
-      const cohort = headerIndexMap.cohort !== -1 ? (columns[headerIndexMap.cohort] || 'Victors Class') : (detectedHeaders ? 'Victors Class' : (columns[6] || 'Victors Class'));
-      const notes = headerIndexMap.notes !== -1 ? (columns[headerIndexMap.notes] || '') : (detectedHeaders ? '' : (columns[8] || ''));
+    if (isHeaderRow) {
+      rawHeaders = firstLineColumns;
+      dataRowsStr = lines.slice(1).map(line => line.split(delimiter).map(c => c.replace(/^["']|["']$/g, '').trim()));
       
-      const idNo = headerIndexMap.idNo !== -1 ? (columns[headerIndexMap.idNo] || '') : (detectedHeaders ? '' : (columns[1] || ''));
-      const age = headerIndexMap.age !== -1 ? (columns[headerIndexMap.age] || '') : (detectedHeaders ? '' : (columns[2] || ''));
-      const gender = headerIndexMap.gender !== -1 ? (columns[headerIndexMap.gender] || '') : (detectedHeaders ? '' : (columns[3] || ''));
-      const village = headerIndexMap.village !== -1 ? (columns[headerIndexMap.village] || '') : (detectedHeaders ? '' : (columns[4] || ''));
-      const caregiver = headerIndexMap.caregiver !== -1 ? (columns[headerIndexMap.caregiver] || '') : (detectedHeaders ? '' : (columns[5] || ''));
-
-      if (!name) continue;
-
-      const contact = rawContact.trim() || '-';
-
-      const errs: string[] = [];
-      if (!name) errs.push('Missing Name');
-      
-      if (contact && contact !== '-' && participants.some(p => p.contact.toLowerCase() === contact.toLowerCase())) {
-        errs.push('Already Enrolled');
-      }
-
-      parsedData.push({
-        id: `temp_${i}_${Date.now()}`,
-        name,
-        contact,
-        cohort: COHORTS.includes(cohort) ? cohort : 'Victors Class',
-        registrationNotes: notes || 'Imported via CSV excel template.',
-        isValid: errs.length === 0,
-        errors: errs,
-        importChecked: errs.length === 0,
-        idNo: idNo || '-',
-        age: age || '-',
-        gender: gender || '-',
-        village: village || '-',
-        caregiver: caregiver || '-'
+      rawHeaders.forEach((col, idx) => {
+        const lCol = col.toLowerCase().trim();
+        if (lCol.includes('name')) initialMapping.name = idx;
+        if (lCol.includes('contact') || lCol.includes('phone') || lCol.includes('email')) initialMapping.contact = idx;
+        if (lCol.includes('cohort')) initialMapping.cohort = idx;
+        if (lCol.includes('note')) initialMapping.notes = idx;
+        if (lCol.includes('id no') || lCol.includes('id number') || lCol === 'id') initialMapping.idNo = idx;
+        if (lCol === 'age') initialMapping.age = idx;
+        if (lCol === 'gender' || lCol === 'sex') initialMapping.gender = idx;
+        if (lCol === 'village') initialMapping.village = idx;
+        if (lCol === 'caregiver') initialMapping.caregiver = idx;
+        if (lCol.includes('schooling') || lCol.includes('boarding') || lCol.includes('school status')) initialMapping.schoolingStatus = idx;
+        if (lCol === 'class' || lCol === 'grade' || lCol.includes('school class')) initialMapping.schoolClass = idx;
       });
+    } else {
+      // Missing original headers list - generate fallback Column names
+      const maxColsCount = Math.max(...lines.map(line => line.split(delimiter).length));
+      for (let c = 0; c < maxColsCount; c++) {
+        rawHeaders.push(`Column ${String.fromCharCode(65 + (c % 26))}${c >= 26 ? Math.floor(c / 26) : ''}`);
+      }
+      dataRowsStr = lines.map(line => line.split(delimiter).map(c => c.replace(/^["']|["']$/g, '').trim()));
+      
+      // Default guess fallback mapping assignment
+      initialMapping = {
+        name: 0,
+        idNo: maxColsCount > 1 ? 1 : -1,
+        age: maxColsCount > 2 ? 2 : -1,
+        gender: maxColsCount > 3 ? 3 : -1,
+        village: maxColsCount > 4 ? 4 : -1,
+        caregiver: maxColsCount > 5 ? 5 : -1,
+        cohort: maxColsCount > 6 ? 6 : -1,
+        contact: maxColsCount > 7 ? 7 : -1,
+        notes: maxColsCount > 8 ? 8 : -1,
+        schoolingStatus: maxColsCount > 9 ? 9 : -1,
+        schoolClass: maxColsCount > 10 ? 10 : -1
+      };
     }
 
-    setParsedImportList(parsedData);
+    setDetectedHeadersList(rawHeaders);
+    setRawCSVRows(dataRowsStr);
+    setManualHeaderMapping(initialMapping);
+    applyMappingOnRawRows(dataRowsStr, initialMapping);
     setImportError(null);
   };
 
@@ -2439,41 +3810,85 @@ export default function App() {
       return;
     }
 
-    const newImportedList: Participant[] = listToImport.map(item => {
-      const randomColor = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
-      return {
-        id: `p_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
-        name: item.name,
-        contact: item.contact || '-',
-        cohort: item.cohort,
-        joinDate: new Date().toISOString().split('T')[0],
-        avatarColor: randomColor,
-        registrationNotes: item.registrationNotes || 'Imported via Bulk List.',
-        outreachNotes: [],
-        idNo: (item as any).idNo || '-',
-        age: (item as any).age || '-',
-        gender: (item as any).gender || '-',
-        village: (item as any).village || '-',
-        caregiver: (item as any).caregiver || '-',
-        isPermanent: true,
-        isImported: true
-      };
-    });
+    let updatedCount = 0;
+    let addedCount = 0;
 
-    // Merge into participants
-    setParticipants(prev => [...prev, ...newImportedList]);
+    setParticipants(prev => {
+      const currentParticipants = [...prev];
+      const newImportedList: Participant[] = [];
 
-    // Initialize default unmarked statuses for all current program schedule dates
-    setAttendance(prev => {
-      const updated = { ...prev };
-      newImportedList.forEach(p => {
-        updated[p.id] = {};
-        sessions.forEach(s => {
-          updated[p.id][s.date] = 'unmarked';
-        });
+      listToImport.forEach(item => {
+        const matched = importStrategy === 'upsert' ? findMatchingParticipant({ name: item.name, idNo: item.idNo, contact: item.contact }) : null;
+        if (matched) {
+          // Update the existing participant profile!
+          const idx = currentParticipants.findIndex(p => p.id === matched.id);
+          if (idx !== -1) {
+            const existing = currentParticipants[idx];
+            // Merge fields
+            currentParticipants[idx] = {
+              ...existing,
+              name: item.name || existing.name,
+              contact: (item.contact && item.contact !== '-') ? item.contact : existing.contact,
+              cohort: item.cohort || existing.cohort,
+              idNo: (item.idNo && item.idNo !== '-') ? item.idNo : existing.idNo,
+              age: (item.age && item.age !== '-') ? item.age : existing.age,
+              gender: (item.gender && item.gender !== '-') ? item.gender : existing.gender,
+              village: (item.village && item.village !== '-') ? item.village : existing.village,
+              caregiver: (item.caregiver && item.caregiver !== '-') ? item.caregiver : existing.caregiver,
+              schoolingStatus: (item.schoolingStatus && item.schoolingStatus !== '-') ? item.schoolingStatus : existing.schoolingStatus,
+              schoolClass: (item.schoolClass && item.schoolClass !== '-') ? item.schoolClass : existing.schoolClass,
+              registrationNotes: item.registrationNotes && item.registrationNotes !== 'Imported via spreadsheet preview mapper.' && item.registrationNotes !== 'Imported via JSON.'
+                ? `${existing.registrationNotes || ''}\n[Update]: ${item.registrationNotes}`
+                : existing.registrationNotes,
+              isImported: true
+            };
+            updatedCount++;
+          }
+        } else {
+          // Create a new participant model!
+          const randomColor = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
+          newImportedList.push({
+            id: `p_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
+            name: item.name,
+            contact: item.contact || '-',
+            cohort: item.cohort,
+            joinDate: new Date().toISOString().split('T')[0],
+            avatarColor: randomColor,
+            registrationNotes: item.registrationNotes || 'Imported via Bulk List.',
+            outreachNotes: [],
+            idNo: item.idNo || '-',
+            age: item.age || '-',
+            gender: item.gender || '-',
+            village: item.village || '-',
+            caregiver: item.caregiver || '-',
+            schoolingStatus: item.schoolingStatus || '-',
+            schoolClass: item.schoolClass || '-',
+            isPermanent: true,
+            isImported: true
+          });
+          addedCount++;
+        }
       });
-      return updated;
+
+      // Initialize default unmarked statuses for newly added participants
+      if (newImportedList.length > 0) {
+        setAttendance(attendancePrev => {
+          const updated = { ...attendancePrev };
+          newImportedList.forEach(p => {
+            updated[p.id] = {};
+            sessions.forEach(s => {
+              updated[p.id][s.date] = 'unmarked';
+            });
+          });
+          return updated;
+        });
+      }
+
+      // Append new participants to updated current list
+      return [...currentParticipants, ...newImportedList];
     });
+
+    alert(`Successfully processed bulk import:\n- New participants added: ${addedCount}\n- Existing profiles updated: ${updatedCount}`);
 
     // Reset view state
     setIsImportOpen(false);
@@ -2507,6 +3922,41 @@ export default function App() {
     link.click();
     document.body.removeChild(link);
   };
+
+  // Download Excel/CSV Attendance Import template pre-configured with active roster
+  const downloadAttendanceTemplate = () => {
+    // Columns: ID No., Student Name, Cohort, Status (Present/Absent)
+    const headers = ["ID No.", "Student Name", "Cohort", "Status (Present/Absent)"];
+    
+    // Dynamic generation from existing active participants
+    const rows = activeParticipants.map(p => [
+      p.idNo || p.id,
+      p.name,
+      p.cohort,
+      "Present"
+    ]);
+
+    const sampleRows = rows.length > 0 ? rows : [
+      ["ID-88220", "Liam Sterling", "Victors Class", "Present"],
+      ["ID-56193", "Jane Chep", "Champions Class", "Absent"],
+      ["ID-45912", "David Kiprop", "Overcomers Class", "Present"]
+    ];
+
+    const csvContent = [
+      headers.join(","),
+      ...sampleRows.map(row => row.map(val => `"${val.replace(/"/g, '""')}"`).join(","))
+    ].join("\n");
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `attendance_import_template_${attendanceImportDate || new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
   
   // High-fidelity PDF document generation for physical folder filing
   const downloadManagerNotificationPDF = (participant: Participant, originalStats: AttendanceStats, shouldPrint: boolean = false) => {
@@ -2531,7 +3981,12 @@ export default function App() {
     let y = 15;
 
     // ---- OFFICIAL HIGH-FIDELITY HEADER BLOCK (COPIED EXACTLY FROM USER'S FORMAT) ----
-    // Left and right visual logos removed per user instructions to maintain official simplicity.
+    // Add the Logo on the left of the header
+    try {
+      doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+    } catch (e) {
+      console.error("Failed to add logo:", e);
+    }
 
     // Official Text Content in Center (Matching Image Format Exactly)
     const centerX = 105; // 210 / 2
@@ -2819,8 +4274,19 @@ export default function App() {
       iframe.src = url;
       document.body.appendChild(iframe);
       iframe.onload = () => {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
+        try {
+          const cw = iframe.contentWindow;
+          if (cw) {
+            cw.focus();
+            cw.print();
+          } else {
+            console.warn("Iframe contentWindow is not accessible. Downloading instead.");
+            doc.save(`manager_notification_${cleanName}.pdf`);
+          }
+        } catch (printErr) {
+          console.warn("Iframe printing blocked by security policies. Downloading file instead:", printErr);
+          doc.save(`manager_notification_${cleanName}.pdf`);
+        }
         setTimeout(() => {
           document.body.removeChild(iframe);
           URL.revokeObjectURL(url);
@@ -2885,13 +4351,54 @@ export default function App() {
     ctx.lineTo(580, 110);
     ctx.stroke();
 
-    // Headers text
+    // Drawing the circular logo synchronously on the canvas
+    try {
+      // Outer silver ring
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(60, 65, 28, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Inner yellow ring highlight
+      ctx.strokeStyle = '#eab308';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(60, 65, 25, -Math.PI * 0.8, Math.PI * 0.8);
+      ctx.stroke();
+
+      // Left orange parent body swoosh & head
+      ctx.fillStyle = '#ff9a00';
+      ctx.beginPath();
+      ctx.arc(55, 56, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(53, 67, 7, -Math.PI * 0.5, Math.PI * 0.5);
+      ctx.fill();
+
+      // Right purple child body swoosh & head
+      ctx.fillStyle = '#ad1457';
+      ctx.beginPath();
+      ctx.arc(67, 63, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(67, 72, 5, -Math.PI * 0.5, Math.PI * 0.5);
+      ctx.fill();
+
+      // Open book base
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(48, 74, 24, 2);
+    } catch (e) {
+      console.error("Canvas logo drawing failed:", e);
+    }
+
+    // Headers text (shifted right to fit the logo)
     ctx.fillStyle = '#0f172a';
-    ctx.font = 'bold 16px sans-serif';
-    ctx.fillText('LOMURIANGOLE CHILD & YOUTH DEVELOPMENT CENTER', 40, 53);
+    ctx.font = 'bold 15px sans-serif';
+    ctx.fillText('LOMURIANGOLE CHILD & YOUTH DEVELOPMENT CENTER', 105, 53);
     ctx.fillStyle = '#0284c7';
     ctx.font = 'bold 10px monospace';
-    ctx.fillText('OFFICIAL INTEGRATED RECOVERY CASE RECORDS - PROJECT UG-1083', 40, 75);
+    ctx.fillText('OFFICIAL INTEGRATED RECOVERY CASE RECORDS - PROJECT UG-1083', 105, 75);
 
     ctx.fillStyle = '#4f46e5';
     ctx.font = 'bold 13px sans-serif';
@@ -3092,6 +4599,15 @@ export default function App() {
   };
 
   const handleDeleteScannedForm = (participantId: string, formId: string) => {
+    if (!isAdminMode) {
+      alert("Demographics and document deletions are restricted. Please unlock Admin Mode to delete records.");
+      return;
+    }
+    const part = participants.find(p => p.id === participantId);
+    if (!part) return;
+    const formToDelete = (part.scannedForms || []).find(f => f.id === formId);
+    if (!formToDelete) return;
+
     if (window.confirm("Are you sure you want to delete this scanned welfare record from the dossier reports?")) {
       setParticipants(prev => {
         const list = prev.map(p => {
@@ -3110,6 +4626,63 @@ export default function App() {
       if (selectedScanDocId === formId) {
         setSelectedScanDocId(null);
       }
+      logSystemAction('audit', 'Scanned Document Reference Deleted', `Deleted scanned record reference of type ${formToDelete.formType} (ID: ${formId}) for student ${part.name}.`);
+    }
+  };
+
+  const handleSaveFilledForm = (participantId: string) => {
+    const newForm: FilledForm = {
+      id: `form_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+      type: formType,
+      date: new Date().toISOString(),
+      data: formData
+    };
+
+    setParticipants(prev => {
+      const list = prev.map(p => {
+        if (p.id === participantId) {
+          const filledForms = p.filledForms || [];
+          return {
+            ...p,
+            filledForms: [newForm, ...filledForms]
+          };
+        }
+        return p;
+      });
+      localStorage.setItem('attendance_tracker_participants', JSON.stringify(list));
+      return list;
+    });
+
+    setIsFormModalOpen(false);
+    setFormData({});
+  };
+
+  const handleDeleteFilledForm = (participantId: string, formId: string) => {
+    if (!isAdminMode) {
+      alert("Form deletion is restricted. Please unlock Admin Mode to delete saved forms.");
+      return;
+    }
+    const part = participants.find(p => p.id === participantId);
+    if (!part) return;
+    const formToDelete = (part.filledForms || []).find(f => f.id === formId);
+    if (!formToDelete) return;
+
+    if (window.confirm(`Are you sure you want to delete this ${formToDelete.type} form filled on ${formToDelete.date.slice(0, 10)}?`)) {
+      setParticipants(prev => {
+        const list = prev.map(p => {
+          if (p.id === participantId) {
+            const filledForms = p.filledForms || [];
+            return {
+              ...p,
+              filledForms: filledForms.filter(f => f.id !== formId)
+            };
+          }
+          return p;
+        });
+        localStorage.setItem('attendance_tracker_participants', JSON.stringify(list));
+        return list;
+      });
+      logSystemAction('audit', 'Assessment Form Deleted', `Permanently deleted saved ${formToDelete.type} form (ID: ${formId}) completed for student ${part.name}.`);
     }
   };
 
@@ -3184,7 +4757,16 @@ export default function App() {
   };
 
   const handleDeleteDocument = (participantId: string, docId: string) => {
-    if (window.confirm("Are you sure you want to delete this official document? This action cannot be reverted.")) {
+    if (!isAdminMode) {
+      alert("Document deletion is restricted. Please unlock Admin Mode to delete official files.");
+      return;
+    }
+    const part = participants.find(p => p.id === participantId);
+    if (!part) return;
+    const docToDelete = (part.documents || []).find(d => d.id === docId);
+    if (!docToDelete) return;
+
+    if (window.confirm(`Are you sure you want to delete this official document "${docToDelete.name}"? This action cannot be reverted.`)) {
       setParticipants(prev => {
         const list = prev.map(p => {
           if (p.id === participantId) {
@@ -3199,6 +4781,7 @@ export default function App() {
         localStorage.setItem('attendance_tracker_participants', JSON.stringify(list));
         return list;
       });
+      logSystemAction('audit', 'Official Document File Pruned', `Permanently deleted official document attachment "${docToDelete.name}" (ID: ${docId}) for student ${part.name}.`);
     }
   };
 
@@ -3226,6 +4809,13 @@ export default function App() {
 
     // Helper functions for headers/footers to keep it elegant and DRY
     const drawHeader = (pageNumber: number) => {
+      // Add the Logo on the left of the header
+      try {
+        doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+      } catch (e) {
+        console.error("Failed to add logo:", e);
+      }
+
       // 1. LOMURIANGOLE CHILD AND YOUTH DEVELOPMENT CENTER UG-1083
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(10);
@@ -3709,8 +5299,19 @@ export default function App() {
       iframe.src = url;
       document.body.appendChild(iframe);
       iframe.onload = () => {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
+        try {
+          const cw = iframe.contentWindow;
+          if (cw) {
+            cw.focus();
+            cw.print();
+          } else {
+            console.warn("Iframe contentWindow is not accessible. Downloading instead.");
+            doc.save(`student_summary_${cleanName}.pdf`);
+          }
+        } catch (printErr) {
+          console.warn("Iframe printing blocked by security policies. Downloading file instead:", printErr);
+          doc.save(`student_summary_${cleanName}.pdf`);
+        }
         setTimeout(() => {
           document.body.removeChild(iframe);
           URL.revokeObjectURL(url);
@@ -3742,6 +5343,13 @@ export default function App() {
     const contentWidth = width - (margin * 2); // 170
 
     // ---- OFFICIAL HIGH-FIDELITY HEADER BLOCK (COPIED EXACTLY FROM USER'S FORMAT) ----
+    // Add the Logo on the left of the header
+    try {
+      doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+    } catch (e) {
+      console.error("Failed to add logo:", e);
+    }
+
     const centerX = 105; // 210 / 2
 
     // 1. LOMURIANGOLE CHILD AND YOUTH DEVELOPMENT CENTER UG-1083
@@ -3971,8 +5579,19 @@ export default function App() {
       iframe.src = url;
       document.body.appendChild(iframe);
       iframe.onload = () => {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
+        try {
+          const cw = iframe.contentWindow;
+          if (cw) {
+            cw.focus();
+            cw.print();
+          } else {
+            console.warn("Iframe contentWindow is not accessible. Downloading instead.");
+            doc.save(`outreach_message_${cleanName}.pdf`);
+          }
+        } catch (printErr) {
+          console.warn("Iframe printing blocked by security policies. Downloading file instead:", printErr);
+          doc.save(`outreach_message_${cleanName}.pdf`);
+        }
         setTimeout(() => {
           document.body.removeChild(iframe);
           URL.revokeObjectURL(url);
@@ -3983,10 +5602,21 @@ export default function App() {
     }
   };
 
-  // High-fidelity PDF generation for the overall Cohort AI Analytics report with Official Signatures
-  const downloadCohortAIReportPDF = () => {
-    if (!aiCohortReport) return;
-    
+  // High-fidelity individual evaluation report PDF generation based on AI report cache and physical student dossiers
+  const downloadIndividualAIReportPDF = (participant: Participant, originalStats: AttendanceStats) => {
+    const aiReport = aiSingleReports[participant.id];
+    if (!aiReport) return;
+
+    // Filter sessions based on Chosen Period
+    let pdfSessions = [...sessions];
+    if (aiReportStartDate) {
+      pdfSessions = pdfSessions.filter(s => s.date >= aiReportStartDate);
+    }
+    if (aiReportEndDate) {
+      pdfSessions = pdfSessions.filter(s => s.date <= aiReportEndDate);
+    }
+    const periodStats = calculateParticipantStats(participant.id, pdfSessions, attendance);
+
     const doc = new jsPDF('p', 'mm', 'a4');
     const width = 210;
     const height = 297;
@@ -3996,8 +5626,15 @@ export default function App() {
 
     let currentPage = 1;
 
-    // Standard high-fidelity official letterhead header helper
+    // Standard high-fidelity official letterhead header (cleaned of AI/Gemini branding)
     const drawHeader = (page: number) => {
+      // Add the Logo on the left of the header
+      try {
+        doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+      } catch (e) {
+        console.error("Failed to add logo:", e);
+      }
+
       // 1. LOMURIANGOLE CHILD AND YOUTH DEVELOPMENT CENTER UG-1083
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(10);
@@ -4017,7 +5654,7 @@ export default function App() {
       doc.text("TEL: ", centerX - 33, 26);
       
       doc.setFont('helvetica', 'normal');
-      doc.setTextColor(217, 119, 6); // Amber-600
+      doc.setTextColor(217, 119, 6); // Amber-500
       doc.text("0778687473 / 078436428 / 0784522071", centerX + 5, 26, { align: 'center' });
 
       // 4. Email: lomuriangolecydc@gmail.com
@@ -4028,24 +5665,24 @@ export default function App() {
       doc.setTextColor(37, 99, 235); // Blue
       doc.text("lomuriangolecydc@gmail.com", centerX + 8, 30.5, { align: 'center' });
 
-      // Separating thick black horizontal line
+      // Divider Line
       doc.setDrawColor(15, 23, 42);
       doc.setLineWidth(0.4);
       doc.line(margin, 34.5, width - margin, 34.5);
 
-      // Sub-Header Document title
+      // Sub-Header Title
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(9.5);
       doc.setTextColor(15, 23, 42);
-      doc.text("OFFICIAL CYDC ROSTER ENGAGEMENT & AI ANALYTICS CONSOLIDATED REPORT", centerX, 39.5, { align: 'center' });
+      doc.text("OFFICIAL PROGRESS, WELFARE & INDIVIDUAL PERFORMANCE EVALUATION REPORT", centerX, 39.5, { align: 'center' });
 
-      // Issue date and status line
+      // Date of Issue
       doc.setFontSize(7.5);
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(100, 116, 139);
       const todayStr = new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' });
-      doc.text(`REPORT CONFIRED DATE: ${todayStr}`, margin, 44);
-      doc.text(`STATUS: CORE COHORT SUCCESS BLUEPRINT`, width - margin, 44, { align: 'right' });
+      doc.text(`DATE OF ASSESSMENT: ${todayStr}`, margin, 44);
+      doc.text(`RECORD STANDING: OFFICIAL DEVELOPMENT DOSSIER`, width - margin, 44, { align: 'right' });
 
       doc.setDrawColor(226, 232, 240);
       doc.setLineWidth(0.25);
@@ -4056,13 +5693,542 @@ export default function App() {
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(7.5);
       doc.setTextColor(148, 163, 184); // slate-400
-      doc.text(`Confidential Ledger — Lomuriangole Development Center (UG 1083)`, margin, height - 12);
+      doc.text(`Official Student Progress Evaluation Ledger — Lomuriangole Development Center (UG 1083)`, margin, height - 12);
       doc.text(`Page ${page} of ${total}`, width - margin, height - 12, { align: 'right' });
     };
 
     drawHeader(currentPage);
     let y = 52;
 
+    // A helper to replace Gemini / AI string patterns so it remains purely official
+    const sanitizeText = (txt: string) => {
+      if (!txt) return '';
+      return txt
+        .replace(/gemini/gi, 'Official Registry System')
+        .replace(/ artificial intelligence /gi, ' Staff Analytics ')
+        .replace(/AI evaluation/gi, 'Formal Progress assessment')
+        .replace(/AI report/gi, 'Progress report')
+        .replace(/AI system/gi, 'Registry Protocol')
+        .replace(/ ai /gi, ' evaluation ')
+        .replace(/powered by Gemini/gi, 'Official Comprehensive Assessment')
+        .replace(/ai model/gi, 'Assessment Protocol')
+        .replace(/large language model/gi, 'Analytical System')
+        .replace(/llm/gi, 'System');
+    };
+
+    // --- SECTION 1: BENEFICIARY PROFILE & REGISTRATION STATUS ---
+    doc.setFillColor(241, 245, 249); // slate-100
+    doc.rect(margin, y, contentWidth, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(15, 23, 42);
+    doc.text("1. BENEFICIARY PROFILE & PROGRAM RECOGNITION STATUS", margin + 3, y + 5);
+    y += 11;
+
+    // Multi-column info layout
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(71, 85, 105);
+    doc.text("Full Name:", margin + 3, y);
+    doc.setFont('helvetica', 'bold'); 
+    doc.setTextColor(15, 23, 42);
+    doc.text(participant.name.toUpperCase(), margin + 42, y);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(71, 85, 105);
+    doc.text("Assigned Cohort Group:", margin + 95, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 23, 42);
+    doc.text(participant.cohort, margin + 142, y);
+
+    y += 6;
+
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(71, 85, 105);
+    doc.text("Age / Gender Status:", margin + 3, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 23, 42);
+    const ageSexStr = `${participant.age || 'N/A'} yrs / ${participant.gender || 'N/A'}`;
+    doc.text(ageSexStr, margin + 42, y);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(71, 85, 105);
+    doc.text("Home Village/Location:", margin + 95, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 23, 42);
+    doc.text(participant.village || 'N/A', margin + 142, y);
+
+    y += 6;
+
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(71, 85, 105);
+    doc.text("Primary Caregiver Name:", margin + 3, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 23, 42);
+    doc.text(participant.caregiver || 'N/A', margin + 42, y);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(71, 85, 105);
+    doc.text("Original Date of Join:", margin + 95, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 23, 42);
+    doc.text(participant.joinDate || 'N/A', margin + 142, y);
+
+    y += 10;
+
+    // --- SECTION 2: ATTENDANCE & ATTENDANCE COMPLIANCE STATS ----
+    doc.setFillColor(241, 245, 249); // slate-100
+    doc.rect(margin, y, contentWidth, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(15, 23, 42);
+    doc.text("2. COMPLIANCE & ATTENDANCE METRIC SEGMENTS", margin + 3, y + 5);
+    y += 11;
+
+    // Draw Stats Table inside Evaluation Period
+    const dateRangeStr = (aiReportStartDate || aiReportEndDate)
+      ? `${aiReportStartDate || 'Beginning'} to ${aiReportEndDate || 'Today'}`
+      : "Full Cumulative History";
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(71, 85, 105);
+    doc.text(`Evaluation Window Period: `, margin + 3, y);
+    doc.setFont('helvetica', 'italic');
+    doc.setTextColor(15, 23, 42);
+    doc.text(dateRangeStr, margin + 42, y);
+
+    y += 6;
+
+    // Quick Grid box for stats
+    doc.setDrawColor(226, 232, 240);
+    doc.setFillColor(250, 251, 252);
+    doc.rect(margin, y, contentWidth, 16, 'FD');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text("LOGGED SESSIONS", margin + 5, y + 5);
+    doc.text("PRESENT", margin + 40, y + 5);
+    doc.text("ABSENT", margin + 70, y + 5);
+    doc.text("EXCUSED", margin + 100, y + 5);
+    doc.text("COMPLIANCE RATE & STANDING", margin + 130, y + 5);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`${periodStats.totalSessions} dates`, margin + 5, y + 12);
+    doc.text(`${periodStats.totalPresent}`, margin + 40, y + 12);
+    doc.text(`${periodStats.totalAbsent}`, margin + 70, y + 12);
+    doc.text(`${periodStats.totalExcused}`, margin + 100, y + 12);
+
+    const scoreStandingStr = sanitizeText(aiReport.attendanceScoreAnalysis || "Normal");
+    doc.text(`${periodStats.attendanceRate}% [${scoreStandingStr}]`, margin + 130, y + 12);
+
+    y += 24;
+
+    // --- SECTION 3: PROGRESS EVALUATION SUMMARY BRIEF ----
+    doc.setFillColor(241, 245, 249); // slate-100
+    doc.rect(margin, y, contentWidth, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(15, 23, 42);
+    doc.text("3. ADMINISTRATIVE EVALUATION SUMMARY & ANALYSIS BRIEF", margin + 3, y + 5);
+    y += 11;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    doc.setTextColor(30, 41, 59);
+
+    const sanitizedSummary = sanitizeText(aiReport.summary);
+    const summaryLines = doc.splitTextToSize(sanitizedSummary, contentWidth - 4);
+    doc.text(summaryLines, margin + 2, y);
+    y += (summaryLines.length * 4) + 6;
+
+    // Insights List
+    if (aiReport.insights && aiReport.insights.length > 0) {
+      if (y > 230) {
+        drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+        doc.addPage();
+        currentPage++;
+        drawHeader(currentPage);
+        y = 52;
+      }
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text("Case Chronicles & Assessment Details:", margin + 2, y);
+      y += 5.5;
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(51, 65, 85);
+
+      aiReport.insights.forEach((ins: string) => {
+        const cleanIns = sanitizeText(ins);
+        const insLines = doc.splitTextToSize(`• ${cleanIns}`, contentWidth - 6);
+        doc.text(insLines, margin + 4, y);
+        y += (insLines.length * 3.8) + 2;
+      });
+      y += 3;
+    }
+
+    // Recommendation
+    if (y > 230) {
+      drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+      doc.addPage();
+      currentPage++;
+      drawHeader(currentPage);
+      y = 52;
+    }
+
+    doc.setFillColor(249, 250, 251);
+    doc.setDrawColor(226, 232, 240);
+    const sanitizedRec = sanitizeText(aiReport.recommendation);
+    const recLines = doc.splitTextToSize(sanitizedRec, contentWidth - 8);
+    const recBoxHeight = (recLines.length * 4) + 8;
+
+    doc.rect(margin, y, contentWidth, recBoxHeight, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(79, 70, 229); // Indigo-600
+    doc.text("DIRECTED STAFF ACTION STEP / COMPLIANCE STRATEGY:", margin + 4, y + 5.5);
+    
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(30, 41, 59);
+    doc.text(recLines, margin + 4, y + 10.5);
+
+    y += recBoxHeight + 8;
+
+    // --- SECTION 4: HISTORIC WELFARE & HEALTH DOSSIER RECOGNIZED RECORDS ---
+    let userForms = participant.filledForms || [];
+    let userScanned = participant.scannedForms || [];
+    let userDocs = participant.documents || [];
+
+    if (aiReportStartDate) {
+      userForms = userForms.filter(f => f.date >= aiReportStartDate);
+      userScanned = userScanned.filter(f => f.uploadDate >= aiReportStartDate);
+      userDocs = userDocs.filter(d => d.uploadDate >= aiReportStartDate);
+    }
+    if (aiReportEndDate) {
+      userForms = userForms.filter(f => f.date <= aiReportEndDate);
+      userScanned = userScanned.filter(f => f.uploadDate <= aiReportEndDate);
+      userDocs = userDocs.filter(d => d.uploadDate <= aiReportEndDate);
+    }
+
+    if (y > 200) {
+      drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+      doc.addPage();
+      currentPage++;
+      drawHeader(currentPage);
+      y = 52;
+    }
+
+    doc.setFillColor(241, 245, 249); // slate-100
+    doc.rect(margin, y, contentWidth, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(15, 23, 42);
+    doc.text("4. RETRIEVED RECORD DOSSIERS & DOCUMENT DIGEST", margin + 3, y + 5);
+    y += 11;
+
+    const hasNoDocs = userForms.length === 0 && userScanned.length === 0 && userDocs.length === 0;
+
+    if (hasNoDocs) {
+      doc.setFont('helvetica', 'italic');
+      doc.setFontSize(8);
+      doc.setTextColor(148, 163, 184);
+      doc.text("No primary health, school visits, or caregiver assessment reports filed within this window.", margin + 3, y);
+      y += 8;
+    } else {
+      // List filled forms
+      if (userForms.length > 0) {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text("Structured Social Assessment Forms Filed:", margin + 2, y);
+        y += 5;
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+
+        userForms.forEach(f => {
+          if (y > 265) {
+            drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+            doc.addPage();
+            currentPage++;
+            drawHeader(currentPage);
+            y = 52;
+          }
+          let recapParts = [];
+          if (f.data.idNo) recapParts.push(`ID: ${f.data.idNo}`);
+          if (f.data.general_condition) recapParts.push(`Condition Code: ${f.data.general_condition}`);
+          if (f.data.average_score_percentage || f.data.average_total) recapParts.push(`Avg Exam: ${f.data.average_score_percentage || f.data.average_total}%`);
+          if (f.data.visitDate || f.data.date_of_visit) recapParts.push(`Date: ${f.data.visitDate || f.data.date_of_visit}`);
+          
+          const textLine = `• [FORM] ${f.type} Assessment — Filed on ${f.date} ${recapParts.length > 0 ? `(${recapParts.join(', ')})` : ''}`;
+          doc.text(textLine, margin + 4, y);
+          y += 4;
+        });
+        y += 2;
+      }
+
+      // List scanned OCR forms
+      if (userScanned.length > 0) {
+        if (y > 250) {
+          drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+          doc.addPage();
+          currentPage++;
+          drawHeader(currentPage);
+          y = 52;
+        }
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text("Scanned Paperwork & Welfare Records Extracted:", margin + 2, y);
+        y += 5;
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+
+        userScanned.forEach(f => {
+          if (y > 265) {
+            drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+            doc.addPage();
+            currentPage++;
+            drawHeader(currentPage);
+            y = 52;
+          }
+          let ocrSummaryText = "";
+          if (f.formType === 'medical' && f.extractedData.medical) {
+            ocrSummaryText = `Blood group: ${f.extractedData.medical.bloodType || 'N/A'}, Disabilities: ${f.extractedData.medical.disabilitiesOrConditions || 'N/A'}`;
+          } else if (f.formType === 'school' && f.extractedData.school) {
+            ocrSummaryText = `School: ${f.extractedData.school.schoolName || 'N/A'}, Grade: ${f.extractedData.school.gradeLevel || 'N/A'}`;
+          } else if (f.formType === 'home_visit' && f.extractedData.home_visit) {
+            ocrSummaryText = `Shelter: ${f.extractedData.home_visit.dwellingType || 'N/A'}, Vulnerabilities: ${f.extractedData.home_visit.riskVulnerabilitiesSummary || 'N/A'}`;
+          } else {
+            ocrSummaryText = `Summary: ${f.extractedData.other?.rawSummary?.slice(0, 100) || 'Verified file content.'}`;
+          }
+
+          const fileLine = `• [SCAN OCR] ${f.formType.toUpperCase()} - ${f.fileName} (Uploaded: ${f.uploadDate}) -> ${ocrSummaryText}`;
+          const splitFileLine = doc.splitTextToSize(fileLine, contentWidth - 6);
+          doc.text(splitFileLine, margin + 4, y);
+          y += (splitFileLine.length * 3.8);
+        });
+        y += 2;
+      }
+
+      // List official documents
+      if (userDocs.length > 0) {
+        if (y > 255) {
+          drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+          doc.addPage();
+          currentPage++;
+          drawHeader(currentPage);
+          y = 52;
+        }
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text("Uploaded Certificates & Credentials:", margin + 2, y);
+        y += 5;
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(51, 65, 85);
+
+        userDocs.forEach(d => {
+          if (y > 265) {
+            drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+            doc.addPage();
+            currentPage++;
+            drawHeader(currentPage);
+            y = 52;
+          }
+          const docLine = `• [DOCUMENT] ${d.name} — Registered in database on ${d.uploadDate}`;
+          doc.text(docLine, margin + 4, y);
+          y += 4;
+        });
+        y += 2;
+      }
+    }
+
+    // --- SECTION 5: SIGN-OFFS (CDO AND PD SIGNATURE BLOCKS) ---
+    if (y > 215) {
+      drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+      doc.addPage();
+      currentPage++;
+      drawHeader(currentPage);
+      y = 52;
+    }
+
+    y += 4;
+
+    doc.setFillColor(241, 245, 249);
+    doc.rect(margin, y, contentWidth, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(15, 23, 42);
+    doc.text("5. WELFARE ENDORSEMENT & COMPLIANCE STAMP BLOCK", margin + 3, y + 5);
+    y += 11;
+
+    doc.setDrawColor(203, 213, 225); // light Slate border
+    doc.setLineWidth(0.35);
+
+    // Left card box: Prepared by CDO
+    doc.rect(margin, y, 78, 33);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(51, 65, 85);
+    doc.text("PREPARED BY (CYDC OFFICER):", margin + 4, y + 5.5);
+    
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.text("Signature: ..............................................................", margin + 4, y + 12.5);
+    doc.setFont('helvetica', 'bold');
+    doc.text("Child Development Officer (CDO)", margin + 4, y + 19.5);
+    doc.setFont('helvetica', 'normal');
+    doc.text("Date of Evaluation: ____ / ____ / ________", margin + 4, y + 26.5);
+
+    // Right card box: Approved by PD
+    doc.rect(margin + 92, y, 78, 33);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(51, 65, 85);
+    doc.text("APPROVED BY (DIRECTORATE):", margin + 96, y + 5.5);
+    
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.text("Signature: ..............................................................", margin + 96, y + 12.5);
+    doc.setFont('helvetica', 'bold');
+    doc.text("Project Director (PD)", margin + 96, y + 19.5);
+    doc.setFont('helvetica', 'normal');
+    doc.text("Date of Approval:  ____ / ____ / ________", margin + 96, y + 26.5);
+
+    y += 38;
+
+    // Stamp Guide Area
+    doc.setDrawColor(226, 232, 240);
+    doc.rect(centerX - 35, y, 70, 16);
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(7);
+    doc.setTextColor(148, 163, 184); // slate-400
+    doc.text("LOMURIANGOLE DEVELOPMENT CENTER SEAL / STAMP", centerX, y + 6.5, { align: 'center' });
+    doc.text("PLACED UPON FINAL ENDORSEMENT", centerX, y + 11.5, { align: 'center' });
+
+    y += 24;
+
+    // Bottom file code
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(6.5);
+    doc.setTextColor(148, 163, 184);
+    const docControlNo = `DOC-ID: ${participant.idNo || 'N/A'}-${Math.floor(1000 + Math.random() * 9000)}-${new Date().getFullYear()}`;
+    doc.text(docControlNo, centerX, y, { align: 'center' });
+
+    // Loop through all pages to replace the TOTAL_PAGES_PLACEHOLDER
+    const totalPages = currentPage;
+    for (let i = 1; i <= totalPages; i++) {
+      doc.setPage(i);
+      drawFooter(i, totalPages);
+    }
+
+    const cleanName = participant.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    doc.save(`evaluation_report_${cleanName}.pdf`);
+  };
+
+  // High-fidelity PDF generation for the overall Cohort AI Analytics report with Official Signatures
+  const downloadCohortAIReportPDF = () => {
+    if (!aiCohortReport) return;
+    
+    const doc = new jsPDF('p', 'mm', 'a4');
+    const width = 210;
+    const height = 297;
+    const margin = 20;
+    const contentWidth = width - (margin * 2); // 170
+    const centerX = 105;
+ 
+    let currentPage = 1;
+ 
+    // Standard high-fidelity official letterhead header helper
+    const drawHeader = (page: number) => {
+      // Add the Logo on the left of the header
+      try {
+        doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+      } catch (e) {
+        console.error("Failed to add logo:", e);
+      }
+ 
+      // 1. LOMURIANGOLE CHILD AND YOUTH DEVELOPMENT CENTER UG-1083
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(15, 23, 42); 
+      doc.text("LOMURIANGOLE CHILD AND YOUTH DEVELOPMENT CENTER UG-1083", centerX, 17, { align: 'center' });
+ 
+      // 2. P.O BOX 57 MOROTO, UGANDA
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(51, 65, 85); 
+      doc.text("P.O BOX 57 MOROTO, UGANDA", centerX, 21.5, { align: 'center' });
+ 
+      // 3. TEL: 0778687473/ 078436428/0784522071
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(51, 65, 85);
+      doc.text("TEL: ", centerX - 33, 26);
+      
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(217, 119, 6); // Amber-600
+      doc.text("0778687473 / 078436428 / 0784522071", centerX + 5, 26, { align: 'center' });
+ 
+      // 4. Email: lomuriangolecydc@gmail.com
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(51, 65, 85);
+      doc.text("Email: ", centerX - 25, 30.5);
+      
+      doc.setTextColor(37, 99, 235); // Blue
+      doc.text("lomuriangolecydc@gmail.com", centerX + 8, 30.5, { align: 'center' });
+ 
+      // Separating thick black horizontal line
+      doc.setDrawColor(15, 23, 42);
+      doc.setLineWidth(0.4);
+      doc.line(margin, 34.5, width - margin, 34.5);
+ 
+      // Sub-Header Document title
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text("OFFICIAL CYDC ROSTER ENGAGEMENT & AI ANALYTICS CONSOLIDATED REPORT", centerX, 39.5, { align: 'center' });
+ 
+      // Issue date and status line
+      doc.setFontSize(7.5);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(100, 116, 139);
+      const todayStr = new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' });
+      doc.text(`REPORT CONFIRED DATE: ${todayStr}`, margin, 44);
+      doc.text(`STATUS: CORE COHORT SUCCESS BLUEPRINT`, width - margin, 44, { align: 'right' });
+ 
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.25);
+      doc.line(margin, 46, width - margin, 46);
+    };
+ 
+    const drawFooter = (page: number, total: number | string) => {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.setTextColor(148, 163, 184); // slate-400
+      doc.text("Confidential Ledger — Lomuriangole Development Center (UG 1083)", margin, height - 12);
+      doc.text(`Page ${page} of ${total}`, width - margin, height - 12, { align: 'right' });
+    };
+ 
+    drawHeader(currentPage);
+    let y = 52;
+ 
     // --- SECTION 1: EXECUTIVE BRIEF ---
     doc.setFillColor(241, 245, 249); // slate-100
     doc.rect(margin, y, contentWidth, 7, 'F');
@@ -4071,7 +6237,7 @@ export default function App() {
     doc.setTextColor(15, 23, 42);
     doc.text("1. EXECUTIVE COHORT ENGAGEMENT SYNOPSIS", margin + 3, y + 5);
     y += 11;
-
+ 
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
     doc.setTextColor(51, 65, 85);
@@ -4079,7 +6245,7 @@ export default function App() {
     const summaryLines = doc.splitTextToSize(aiCohortReport.cohortSummary, contentWidth - 4);
     doc.text(summaryLines, margin + 2, y);
     y += (summaryLines.length * 4) + 6;
-
+ 
     // --- SECTION 2: WELFARE SEGMENTS & RISK METRICS -----
     if (y > 220) {
       drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
@@ -4088,7 +6254,7 @@ export default function App() {
       drawHeader(currentPage);
       y = 52;
     }
-
+ 
     doc.setFillColor(241, 245, 249);
     doc.rect(margin, y, contentWidth, 7, 'F');
     doc.setFont('helvetica', 'bold');
@@ -4096,15 +6262,124 @@ export default function App() {
     doc.setTextColor(15, 23, 42);
     doc.text("2. ROSTER HEALTH & ENGAGEMENT CLASSIFICATION DISTRIBUTION", margin + 3, y + 5);
     y += 11;
-
+ 
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
     doc.setTextColor(51, 65, 85);
-
+ 
     const riskLines = doc.splitTextToSize(aiCohortReport.overallRiskDistribution, contentWidth - 4);
     doc.text(riskLines, margin + 2, y);
     y += (riskLines.length * 4) + 8;
-
+ 
+    // --- SECTION 2.1: COMPARATIVE ANALYSIS & STATISTICAL SUBGROUPS -----
+    if (y > 200) {
+      drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+      doc.addPage();
+      currentPage++;
+      drawHeader(currentPage);
+      y = 52;
+    }
+ 
+    doc.setFillColor(241, 245, 249);
+    doc.rect(margin, y, contentWidth, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(15, 23, 42);
+    doc.text("2.1 DETAILS-BASED COMPARATIVE SUBGROUP ANALYSIS", margin + 3, y + 5);
+    y += 11;
+ 
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(51, 65, 85);
+ 
+    const compLines = doc.splitTextToSize(aiCohortReport.comparativeAnalysis || "No custom comparative data analyzed.", contentWidth - 4);
+    doc.text(compLines, margin + 2, y);
+    y += (compLines.length * 4) + 6;
+ 
+    // System Stats Subsections
+    const statsCategories = [
+      { label: "A. Village Access & Spatial Travel Hurdles", text: aiCohortReport.systemStats?.villageBreakdown },
+      { label: "B. Gender Level Attendance & Support Comparisons", text: aiCohortReport.systemStats?.genderComparison },
+      { label: "C. Schooling Boarder vs Day-Scholar Impact Factors", text: aiCohortReport.systemStats?.schoolingImpact }
+    ];
+ 
+    statsCategories.forEach(cat => {
+      if (y > 235) {
+        drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+        doc.addPage();
+        currentPage++;
+        drawHeader(currentPage);
+        y = 52;
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(15, 23, 42);
+      doc.text(cat.label, margin + 2, y);
+      y += 4.5;
+ 
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.setTextColor(71, 85, 105);
+      const catLines = doc.splitTextToSize(cat.text || "Diagnostic review details pending.", contentWidth - 8);
+      doc.text(catLines, margin + 4, y);
+      y += (catLines.length * 3.8) + 5;
+    });
+ 
+    // --- SECTION 2.2: STRATEGIC POLICY RECOMMENDATIONS -----
+    if (y > 210) {
+      drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+      doc.addPage();
+      currentPage++;
+      drawHeader(currentPage);
+      y = 52;
+    }
+ 
+    doc.setFillColor(241, 245, 249);
+    doc.rect(margin, y, contentWidth, 7, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(15, 23, 42);
+    doc.text("2.2 ACTIONABLE PROGRAM STRATEGIC POLICY & INTERVENTION RECOMMENDATIONS", margin + 3, y + 5);
+    y += 11;
+ 
+    const recommendations = aiCohortReport.strategicRecommendations || [];
+    recommendations.forEach((rec, idx) => {
+      const recTitle = `${idx + 1}. [${rec.category.toUpperCase()}] Initiative: ${rec.initiative}`;
+      const titleSplit = doc.splitTextToSize(recTitle, contentWidth - 8);
+      const ratSplit = doc.splitTextToSize(`Rationale & Execution: ${rec.rationale}`, contentWidth - 10);
+      const sizeNeeded = (titleSplit.length * 4.5) + (ratSplit.length * 3.8) + 10;
+ 
+      if (y + sizeNeeded > 265) {
+        drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
+        doc.addPage();
+        currentPage++;
+        drawHeader(currentPage);
+        y = 52;
+      }
+ 
+      // Draw a light grey box
+      doc.setDrawColor(241, 245, 249);
+      doc.setLineWidth(0.35);
+      doc.setFillColor(254, 254, 255);
+      doc.rect(margin, y, contentWidth, sizeNeeded - 2, 'FD');
+ 
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(15, 23, 42);
+      doc.text(titleSplit, margin + 3, y + 5);
+      
+      doc.setFontSize(7);
+      doc.setTextColor(180, 83, 9); // Amber
+      doc.text(`Priority: ${rec.priority}`, margin + contentWidth - 30, y + 5, { align: 'right' });
+ 
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text(ratSplit, margin + 4, y + 6 + (titleSplit.length * 4.2));
+ 
+      y += sizeNeeded;
+    });
+ 
     // --- SECTION 3: STUDENT ADVISORY BREAKDOWNS -----
     if (y > 210) {
       drawFooter(currentPage, "TOTAL_PAGES_PLACEHOLDER");
@@ -4113,7 +6388,7 @@ export default function App() {
       drawHeader(currentPage);
       y = 52;
     }
-
+ 
     doc.setFillColor(241, 245, 249);
     doc.rect(margin, y, contentWidth, 7, 'F');
     doc.setFont('helvetica', 'bold');
@@ -4121,7 +6396,7 @@ export default function App() {
     doc.setTextColor(15, 23, 42);
     doc.text("3. PERSONALIZED INDIVIDUAL PARTICIPANT ENGAGEMENT EVALUATIONS", margin + 3, y + 5);
     y += 11;
-
+ 
     // We loop through students inside the report
     aiCohortReport.studentReports.forEach((report, index) => {
       const synSplit = doc.splitTextToSize(`"${report.synopsis}"`, contentWidth - 8);
@@ -4143,18 +6418,18 @@ export default function App() {
         doc.text("SECTION 3: INDIVIDUAL ADVISORY PROFILE SUMMARY INDEX (CONTINUED)", margin, y);
         y += 6;
       }
-
+ 
       // Draw light outline panel box
       doc.setDrawColor(226, 232, 240); // slate-200
       doc.setFillColor(252, 253, 254);
       doc.rect(margin, y, contentWidth, itemHeight - 2, 'FD');
-
+ 
       // Index and Name indicator
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(8);
       doc.setTextColor(15, 23, 42);
       doc.text(`${index + 1}. Student: ${report.name}`, margin + 3, y + 5);
-
+ 
       // Status flag color choices
       let stColor = [37, 99, 235]; 
       if (report.standing.toLowerCase().includes('critical') || report.standing.toLowerCase().includes('risk') || report.standing.toLowerCase().includes('warning') || report.standing.toLowerCase().includes('red')) {
@@ -4164,24 +6439,24 @@ export default function App() {
       } else if (report.standing.toLowerCase().includes('safe') || report.standing.toLowerCase().includes('stable') || report.standing.toLowerCase().includes('green')) {
         stColor = [5, 150, 105]; 
       }
-
+ 
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7.5);
       doc.setTextColor(stColor[0], stColor[1], stColor[2]);
       doc.text(`Standing: ${report.standing}`, margin + contentWidth - 62, y + 5, { align: 'right' });
-
+ 
       doc.setTextColor(100, 116, 139);
       doc.text(`Rate: ${report.attendanceRate}`, margin + contentWidth - 3, y + 5, { align: 'right' });
-
+ 
       let currentSubY = y + 10;
-
+ 
       // Evaluative Synopsis
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(7.5);
       doc.setTextColor(71, 85, 105);
       doc.text(synSplit, margin + 4, currentSubY);
       currentSubY += (synSplit.length * 4) + 1.5;
-
+ 
       // Recommended Staff Actions
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7);
@@ -4195,7 +6470,7 @@ export default function App() {
       
       y += itemHeight;
     });
-
+ 
     // --- SECTION 4: DOUBLE-STAFF ENDORSEMENT SIGN-OFFS (PREPARED & APPROVED) ---
     // CDO WHO PREPARES & PD WHO APPROVES
     if (y > 220) {
@@ -4205,9 +6480,9 @@ export default function App() {
       drawHeader(currentPage);
       y = 52;
     }
-
+ 
     y += 4;
-
+ 
     doc.setFillColor(241, 245, 249);
     doc.rect(margin, y, contentWidth, 7, 'F');
     doc.setFont('helvetica', 'bold');
@@ -4215,10 +6490,10 @@ export default function App() {
     doc.setTextColor(15, 23, 42);
     doc.text("4. EXECUTIVE ADVISORY SIGN-OFF & ENDORSEMENTS", margin + 3, y + 5);
     y += 11;
-
+ 
     doc.setDrawColor(203, 213, 225); // light Slate border
     doc.setLineWidth(0.35);
-
+ 
     // Left card box: Prepared by CDO
     doc.rect(margin, y, 78, 33);
     doc.setFont('helvetica', 'bold');
@@ -4233,7 +6508,7 @@ export default function App() {
     doc.text("Child Development Officer (CDO)", margin + 4, y + 19.5);
     doc.setFont('helvetica', 'normal');
     doc.text("Date of Preparation: ____ / ____ / ________", margin + 4, y + 26.5);
-
+ 
     // Right card box: Approved by PD
     doc.rect(margin + 92, y, 78, 33);
     doc.setFont('helvetica', 'bold');
@@ -4248,22 +6523,22 @@ export default function App() {
     doc.text("Project Director (PD)", margin + 96, y + 19.5);
     doc.setFont('helvetica', 'normal');
     doc.text("Date of Approval:  ____ / ____ / ________", margin + 96, y + 26.5);
-
+ 
     y += 38;
-
+ 
     // Official sealing line
     doc.setFont('helvetica', 'italic');
     doc.setFontSize(7);
     doc.setTextColor(148, 163, 184); // slate-400
     doc.text("Official Lomuriangole CYDC Engagement Summary. Retain copy strictly in local master cabinet.", centerX, y, { align: 'center' });
-
+ 
     // Print headers and page counts on all pages in a subsequent loop
     const totalPages = currentPage;
     for (let i = 1; i <= totalPages; i++) {
       doc.setPage(i);
       drawFooter(i, totalPages);
     }
-
+ 
     doc.save(`Lomuriangole_CYDC_Cohort_AI_Report_${new Date().toISOString().split('T')[0]}.pdf`);
   };
 
@@ -4594,6 +6869,7 @@ export default function App() {
     });
 
     alert(`Attendance successfully imported! \n- Marked PRESENT: ${matchedIds.size} student(s) \n- Marked ABSENT: ${activeParticipants.length - matchedIds.size} student(s) \n- Date: ${attendanceImportDate}`);
+    logSystemAction('transaction', 'Bulk Attendance Imported', `Processed roster scan for session "${attendanceImportDate}": marked ${matchedIds.size} present and ${activeParticipants.length - matchedIds.size} absent.`);
     
     // Close & reset
     setIsAttendanceImportOpen(false);
@@ -4629,6 +6905,7 @@ export default function App() {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      logSystemAction('transaction', 'Database Backup Downloaded', `Exported comprehensive database JSON backup with ${participants.length} students.`);
     } catch (e) {
       console.error("Backup failed:", e);
       alert("Failed to export backup file. Check browser console logs.");
@@ -4670,7 +6947,13 @@ export default function App() {
           `Are you absolutely sure you want to RESTORE this backup? This WILL completely overwrite your current database. This action is irreversible.`;
 
         if (window.confirm(confirmMsg)) {
-          setParticipants(restoredParticipants);
+          const pSeen = new Set<string>();
+          const dedupedParticipants = restoredParticipants.filter((p: Participant) => {
+            if (!p || !p.id || pSeen.has(p.id)) return false;
+            pSeen.add(p.id);
+            return true;
+          });
+          setParticipants(dedupedParticipants);
           const seen = new Set<string>();
           const dedupedSessions = restoredSessions.filter((s: Session) => {
             if (!s.date || seen.has(s.date)) return false;
@@ -4679,6 +6962,7 @@ export default function App() {
           });
           setSessions(dedupedSessions);
           setAttendance(restoredAttendance);
+          logSystemAction('audit', 'Database Backup Restored', `Overwrote database contents from backup file "${file.name}" with ${restoredParticipants.length} student files.`);
           alert("🎉 Backup restored successfully! All participants, log dates, and attendance markings have been re-indexed.");
         }
       } catch (err: any) {
@@ -4692,6 +6976,15 @@ export default function App() {
   };
 
   // Save edited session date / label
+  const handleUpdateSessionData = (date: string, checklist?: Record<string, boolean>, notes?: string) => {
+    setSessions(prev => prev.map(s => {
+      if (s.date === date) {
+        return { ...s, checklist: checklist !== undefined ? checklist : s.checklist, notes: notes !== undefined ? notes : s.notes };
+      }
+      return s;
+    }));
+  };
+
   const handleEditSession = (oldDate: string, newDate: string, newLabel: string) => {
     if (!isAdminMode) {
       alert("Demographics and session modifications are restricted. Please unlock Admin Mode to modify system records.");
@@ -4762,6 +7055,7 @@ export default function App() {
       setSessions(INITIAL_SESSIONS);
       setAttendance(INITIAL_ATTENDANCE);
       setJustReset(true);
+      logSystemAction('audit', 'System Demo Reset', 'Wiped database registries and reset the student roster to Lomuriangole CYDC defaults.');
       setTimeout(() => setJustReset(false), 3000);
     }
   };
@@ -4778,6 +7072,7 @@ export default function App() {
       setSessions([]);
       setAttendance({});
       setSelectedParticipantId(null);
+      logSystemAction('audit', 'System Database Wipe', 'Completed full database wipe of student files, logs, and attendance markings.');
     }
   };
 
@@ -4794,6 +7089,7 @@ export default function App() {
         if (selectedParticipantId === id) {
           setSelectedParticipantId(null);
         }
+        logSystemAction('audit', 'Student Deleted Permanently', `Permanently erased archived student record ID: ${id} from Lomuriangole registries.`);
       }
     } else {
       const partName = participants.find(p => p.id === id)?.name || "this student";
@@ -4802,6 +7098,7 @@ export default function App() {
         if (selectedParticipantId === id) {
           setSelectedParticipantId(null);
         }
+        logSystemAction('audit', 'Student Archived', `Archived active student [${partName}] into the Former Participants directory.`);
       }
     }
   };
@@ -4816,6 +7113,7 @@ export default function App() {
     const partName = participants.find(p => p.id === id)?.name || "this student";
     if (window.confirm(`Restore ${partName} back to the active participants list?`)) {
       setParticipants(prev => prev.map(p => p.id === id ? { ...p, isFormer: false, formerDate: undefined } : p));
+      logSystemAction('audit', 'Student Restored', `Restored archived student [${partName}] (ID: ${id}) back to the active tracking roster.`);
     }
   };
 
@@ -4834,6 +7132,7 @@ export default function App() {
       const todayStr = new Date().toISOString().split('T')[0];
       setParticipants(prev => prev.map(p => !p.isFormer ? { ...p, isFormer: true, formerDate: todayStr } : p));
       setSelectedParticipantId(null);
+      logSystemAction('audit', 'Bulk Archive Registry', `Batch archived all ${activeParticipants.length} active students to Former Partners archives.`);
     }
   };
 
@@ -4976,8 +7275,11 @@ export default function App() {
             setIsAuthLoading(false);
             return;
           }
-          await createUserWithEmailAndPassword(auth, authEmail.trim(), authPassword);
-          setAuthMessage("Account registered successfully! Synchronizing system data...");
+          const userCredential = await createUserWithEmailAndPassword(auth, authEmail.trim(), authPassword);
+          if (userCredential.user) {
+            await sendEmailVerification(userCredential.user);
+          }
+          setAuthMessage("Account registered successfully! A secure verification link has been dispatched to your email address. Please click the link inside your email (inspecting spam if necessary) to complete authentication and synchronize system data.");
         } else {
           await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword);
           setAuthMessage("Signed in successfully! Downloading your saved registers...");
@@ -5291,8 +7593,8 @@ export default function App() {
           
           <div className="flex items-center justify-between xl:justify-start gap-3 w-full xl:w-auto">
             <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl bg-slate-900 flex items-center justify-center text-white shadow-md">
-                <BookOpen className="h-5 w-5 text-amber-300" />
+              <div className="h-11 w-11 rounded-full overflow-hidden flex items-center justify-center bg-white shadow-md border border-slate-200">
+                <LogoSVG className="h-full w-full" />
               </div>
               <div>
                 <h1 className="text-xl font-bold text-slate-900 tracking-tight font-sans">
@@ -5551,16 +7853,50 @@ export default function App() {
 
             {/* Admin Mode Toggle Shield */}
             <div className="flex items-center gap-2 py-2">
+              {/* Case Welfare Email Alerts Launcher */}
+              <button
+                onClick={() => {
+                  const defaultDate = firstUnemailedFullyMarkedSession?.date || (sessions[0]?.date || null);
+                  setEmailModalSelectedDate(defaultDate);
+                  setIsEmailAlertModalOpen(true);
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-[10.5px] sm:text-xs font-bold shadow-3xs cursor-pointer transition-all ${
+                  firstUnemailedFullyMarkedSession
+                    ? "bg-amber-500/10 border-amber-300 hover:bg-amber-500/20 text-amber-700 animate-pulse"
+                    : "bg-slate-50 border-slate-200 hover:bg-slate-100 text-slate-600"
+                }`}
+                title="Manage Case Alerts Email Dispatches & Settings"
+              >
+                <Mail className="h-3.5 w-3.5" />
+                <span>Email Alerts</span>
+                {firstUnemailedFullyMarkedSession && (
+                  <span className="bg-amber-500 text-slate-950 text-[9px] font-extrabold px-1 py-0.2 rounded font-mono">
+                    PENDING
+                  </span>
+                )}
+              </button>
+
               {isAdminMode ? (
-                <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 text-[10.5px] sm:text-xs font-bold border border-emerald-200 shadow-3xs">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 text-[10.5px] sm:text-xs font-bold border border-emerald-200 shadow-3xs">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
                   <span>🛡️ Staff Admin (Unlocked)</span>
+                  <span className="text-emerald-300 pointer-events-none">|</span>
+                  <span className="text-[10px] text-slate-500 font-sans font-medium shrink-0">Operator:</span>
+                  <input
+                    type="text"
+                    placeholder="Enter your name to sign logs..."
+                    value={operatorName}
+                    onChange={(e) => handleUpdateOperatorName(e.target.value)}
+                    className="bg-white border border-emerald-200 rounded px-2 py-0.5 text-[10px] font-bold text-slate-800 w-32 focus:outline-none focus:ring-1 focus:ring-emerald-500 font-sans"
+                    title="Enter your custom name to trace changes in the Security Audit Trail and Transaction Journals"
+                  />
                   <button 
                     onClick={() => {
                       setIsAdminMode(false);
                       setIsEditingProfile(false);
+                      logSystemAction('audit', 'Admin Session Terminated', `${operatorName.trim() || 'Staff Administrator'} session terminated and status locked down.`, operatorName.trim());
                     }}
-                    className="ml-1 text-[9.5px] text-emerald-800 hover:text-rose-600 font-extrabold cursor-pointer border-l pl-1.5 border-emerald-300"
+                    className="ml-1 text-[9.5px] text-emerald-800 hover:text-rose-600 font-extrabold cursor-pointer border-l pl-2 border-emerald-300"
                     title="Lock Admin Mode"
                   >
                     Lock
@@ -5575,8 +7911,10 @@ export default function App() {
                       setPasscodeAttempt('');
                       setPasscodeError('');
                       setIsPasscodeFieldOpen(false);
+                      logSystemAction('audit', 'Admin Space Unlocked', 'Privileged Administrator session initiated using verification passcode.', 'Admin Operator');
                     } else {
                       setPasscodeError('Invalid Code');
+                      logSystemAction('audit', 'Admin Unlock Failed', 'Unauthorized access warning: incorrect PIN security key entered during validation.', 'Secured Terminal');
                       setTimeout(() => setPasscodeError(''), 2500);
                     }
                   }}
@@ -5624,6 +7962,51 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {currentTab === 'tracker' && (
           <>
+             {/* COMPLETED SESSION ALERT PROMPT BANNER */}
+             {isAutomaticEmailEnabled && firstUnemailedFullyMarkedSession && (
+               <div id="session-email-prompt-banner" className="bg-gradient-to-r from-amber-50 to-amber-100/55 border border-amber-200/90 rounded-2xl p-4 mb-6 shadow-3xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4 font-sans animate-fade-in relative overflow-hidden">
+                 <div className="absolute top-0 right-0 h-24 w-24 bg-amber-500/10 rounded-full blur-xl -mr-6 -mt-6"></div>
+                 <div className="flex items-start gap-3 relative z-10">
+                   <div className="bg-amber-500 rounded-xl p-2.5 text-slate-950 shrink-0 shadow-2xs animate-pulse">
+                     <Mail className="w-5 h-5" />
+                   </div>
+                   <div>
+                     <h4 className="text-xs font-bold text-slate-900 flex items-center gap-1.5 uppercase tracking-wide">
+                       📧 Case Welfare Alerts Ready for Dispatch
+                     </h4>
+                     <p className="text-[11px] text-slate-800 mt-1 leading-relaxed max-w-2xl font-medium">
+                       Class session on <strong>{firstUnemailedFullyMarkedSession.date} {firstUnemailedFullyMarkedSession.label ? `(${firstUnemailedFullyMarkedSession.label})` : ''}</strong> is completely marked. An alert summary email outlining red and yellow student status flags has not been dispatched to staff yet.
+                     </p>
+                   </div>
+                 </div>
+                 
+                 <div className="flex shrink-0 gap-2 w-full md:w-auto relative z-10 self-stretch md:self-auto items-end justify-end">
+                   <button
+                     type="button"
+                     onClick={() => {
+                       dismissEmailAlertPrompt(firstUnemailedFullyMarkedSession.date);
+                     }}
+                     className="w-full md:w-auto bg-white/80 hover:bg-white text-slate-750 text-xs font-semibold px-3 py-2 rounded-xl border border-slate-200 shadow-3xs cursor-pointer transition-all"
+                     title="Dismiss this reminder. You can still email alert summaries manually from the Email Alerts button."
+                   >
+                     Skip / Dismiss
+                   </button>
+                   <button
+                     type="button"
+                     onClick={() => {
+                       setEmailModalSelectedDate(firstUnemailedFullyMarkedSession.date);
+                       setIsEmailAlertModalOpen(true);
+                     }}
+                     className="w-full md:w-auto bg-amber-500 hover:bg-amber-600 text-slate-955 text-xs font-bold px-4 py-2 rounded-xl transition-all shadow-2xs cursor-pointer flex items-center justify-center gap-1.5 hover:scale-[1.01]"
+                     title="Review details and dispatch Single alert email securely to Lomuriangole staff."
+                   >
+                     <Mail className="w-3.5 h-3.5 shrink-0" />
+                     Review & Send Email
+                   </button>
+                 </div>
+               </div>
+             )}
+
              {/* CAREGIVER CHECK-IN NOTIFICATION BANNER */}
              {dueCheckInParticipantsList.length > 0 && (
                <div id="caregiver-checkin-banner" className="bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-150 rounded-2xl p-4 mb-6 shadow-3xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4 font-sans animate-fade-in relative overflow-hidden">
@@ -5646,7 +8029,7 @@ export default function App() {
                      {/* Suggesting some due students as preview */}
                      <div className="flex flex-wrap gap-2 mt-3.5">
                        <span className="text-[10px] text-indigo-700/80 font-bold uppercase tracking-wider self-center">Due for Check-In:</span>
-                       {dueCheckInParticipantsList.slice(0, 4).map(p => {
+                       {dueCheckInParticipantsList.slice(0, 4).map((p, pIdx) => {
                          const hasNotes = p.outreachNotes && p.outreachNotes.length > 0;
                          let labelText = 'Never';
                          if (hasNotes) {
@@ -5660,7 +8043,7 @@ export default function App() {
                          }
                          return (
                            <button
-                             key={p.id}
+                             key={`${p.id}-${pIdx}`}
                              type="button"
                              onClick={() => {
                                setSelectedParticipantId(p.id);
@@ -6131,8 +8514,8 @@ export default function App() {
                   ) : (
                     <>
                       <option value="" disabled>-- Select Session --</option>
-                      {sessions.map(s => (
-                        <option key={s.date} value={s.date}>
+                      {sessions.map((s, sIdx) => (
+                        <option key={`${s.date}-${sIdx}`} value={s.date}>
                           {s.date} — {s.label || 'Regular Session'}
                         </option>
                       ))}
@@ -6143,15 +8526,27 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  disabled={!isAdminMode}
                   onClick={() => handleBulkSetAttendance('present')}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow-2xs cursor-pointer transition-colors flex items-center gap-1"
+                  className={`font-bold text-xs py-2 px-4 rounded-xl shadow-2xs transition-colors flex items-center gap-1 ${
+                    isAdminMode
+                      ? "bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
+                      : "bg-slate-100 border border-slate-200 text-slate-400 cursor-not-allowed text-[11px] pointer-events-none"
+                  }`}
+                  title={isAdminMode ? "Set all currently displayed participants as Present" : "Accidental edit protection: please unlock Admin Mode first"}
                 >
                   Bulk Set Present
                 </button>
                 <button
                   type="button"
+                  disabled={!isAdminMode}
                   onClick={() => handleBulkSetAttendance('absent')}
-                  className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs py-2 px-4 rounded-xl shadow-2xs cursor-pointer transition-colors flex items-center gap-1"
+                  className={`font-bold text-xs py-2 px-4 rounded-xl shadow-2xs transition-colors flex items-center gap-1 ${
+                    isAdminMode
+                      ? "bg-rose-600 hover:bg-rose-700 text-white cursor-pointer"
+                      : "bg-slate-100 border border-slate-200 text-slate-400 cursor-not-allowed text-[11px] pointer-events-none"
+                  }`}
+                  title={isAdminMode ? "Set all currently displayed participants as Absent" : "Accidental edit protection: please unlock Admin Mode first"}
                 >
                   Bulk Set Absent
                 </button>
@@ -6218,7 +8613,7 @@ export default function App() {
 
                   return (
                     <div
-                      key={day.date}
+                      key={`${day.date}-${idx}`}
                       onMouseEnter={() => setHoveredHeatmapIndex(idx)}
                       onMouseLeave={() => setHoveredHeatmapIndex(null)}
                       onClick={() => {
@@ -6322,9 +8717,9 @@ export default function App() {
                                         </div>
                                       ) : (
                                         <div className="max-h-[145px] overflow-y-auto pr-1 space-y-1.5 scrollbar-thin scrollbar-thumb-slate-200">
-                                          {day.absentParticipants.map(absParticipant => (
+                                          {day.absentParticipants.map((absParticipant, absIdx) => (
                                             <div 
-                                              key={absParticipant.id}
+                                              key={`${absParticipant.id}-${absIdx}`}
                                               className="flex items-center justify-between p-1 bg-slate-50 border border-slate-150 rounded-lg hover:bg-slate-100 hover:border-slate-250 transition-colors"
                                             >
                                               <div className="flex items-center gap-1.5 max-w-[150px]">
@@ -6558,9 +8953,9 @@ export default function App() {
                               </div>
                             ) : (
                               <div className="max-h-[145px] overflow-y-auto space-y-1.5 pr-0.5 border border-slate-200/60 bg-white p-1.5 rounded-xl shadow-3xs scrollbar-thin scrollbar-thumb-slate-200">
-                                {day.absentParticipants.map(absParticipant => (
+                                {day.absentParticipants.map((absParticipant, absIdx) => (
                                   <div 
-                                    key={absParticipant.id}
+                                    key={`${absParticipant.id}-${absIdx}`}
                                     className="flex items-center justify-between p-1 hover:bg-slate-50 border border-slate-100/40 rounded-lg transition-colors"
                                   >
                                     <div className="flex items-center gap-2 max-w-[150px]">
@@ -6616,23 +9011,33 @@ export default function App() {
                           Evaluated across <span className="font-bold text-slate-600">{day.totalCount} students</span>
                         </span>
                         {day.session.date <= new Date().toISOString().split('T')[0] && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!isAdminMode) {
-                                alert("Session modifications are restricted. Please unlock Admin Mode to modify system records.");
-                                setIsPasscodeFieldOpen(true);
-                                return;
-                              }
-                              setEditingSessionOriginalDate(day.session!.date);
-                              setEditSessionDate(day.session!.date);
-                              setEditSessionLabel(day.session!.label || '');
-                            }}
-                            className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-extrabold shrink-0 cursor-pointer transition-colors border border-indigo-150"
-                            title={isAdminMode ? "Edit session date/label details" : "Lock - Enable Admin Mode to edit session"}
-                          >
-                            Edit Session
-                          </button>
+                          <div className="flex gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedSessionDate(day.session!.date)}
+                              className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-2 py-1 rounded-lg text-[10px] font-extrabold cursor-pointer transition-colors border border-emerald-150"
+                              title="Inspect session notes and checklist"
+                            >
+                              Inspect
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!isAdminMode) {
+                                  alert("Session modifications are restricted. Please unlock Admin Mode to modify system records.");
+                                  setIsPasscodeFieldOpen(true);
+                                  return;
+                                }
+                                setEditingSessionOriginalDate(day.session!.date);
+                                setEditSessionDate(day.session!.date);
+                                setEditSessionLabel(day.session!.label || '');
+                              }}
+                              className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-2 py-1 rounded-lg text-[10px] font-extrabold cursor-pointer transition-colors border border-indigo-150"
+                              title={isAdminMode ? "Edit session date/label details" : "Lock - Enable Admin Mode to edit session"}
+                            >
+                              Edit
+                            </button>
+                          </div>
                         )}
                       </div>
                     ) : null}
@@ -6686,6 +9091,23 @@ export default function App() {
                 </select>
               </div>
 
+              {/* Village Filter */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400 font-semibold font-mono">Village:</span>
+                <select
+                  value={selectedVillage}
+                  onChange={(e) => setSelectedVillage(e.target.value)}
+                  className="bg-slate-50 border border-slate-200 rounded-xl text-xs py-2 px-3 font-medium text-slate-700 focus:outline-none focus:border-slate-400 cursor-pointer"
+                >
+                  <option value="All Villages">All Villages</option>
+                  {uniqueVillages.map(v => (
+                    <option key={v} value={v}>
+                      🏡 {v}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {/* Demographics / Segment filter */}
               <div className="flex items-center gap-2">
                 <span className="text-xs text-slate-400 font-semibold font-mono">Segment:</span>
@@ -6708,6 +9130,41 @@ export default function App() {
                 </select>
               </div>
 
+              {/* School Status & Class Filter */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400 font-semibold font-mono">School:</span>
+                <select
+                  value={selectedSchoolingStatus}
+                  onChange={(e) => setSelectedSchoolingStatus(e.target.value)}
+                  className="bg-slate-50 border border-slate-200 rounded-xl text-xs py-2 px-3 font-semibold text-slate-705 focus:outline-none focus:border-slate-400 cursor-pointer"
+                >
+                  <option value="All">All Period</option>
+                  <option value="Day Scholar">School Time (Day Scholars)</option>
+                  <option value="Boarder">Boarders</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400 font-semibold font-mono">Class:</span>
+                <div className="relative flex items-center">
+                  <input
+                    type="text"
+                    value={selectedSchoolClass === 'All' ? '' : selectedSchoolClass}
+                    onChange={(e) => setSelectedSchoolClass(e.target.value || 'All')}
+                    placeholder="All Classes"
+                    className="bg-slate-50 border border-slate-200 rounded-xl text-xs py-2 px-3 font-semibold text-slate-705 focus:outline-none focus:border-slate-400 w-28"
+                  />
+                  {selectedSchoolClass !== 'All' && (
+                    <button 
+                      onClick={() => setSelectedSchoolClass('All')}
+                      className="absolute right-2 text-slate-400 hover:text-slate-600"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
               {/* Attendance Sort filter */}
               <div className="flex items-center gap-2">
                 <span className="text-xs text-slate-400 font-semibold font-mono font-medium">Rank:</span>
@@ -6720,6 +9177,116 @@ export default function App() {
                   <option value="best">🏆 Best Attendance Rate</option>
                   <option value="worst">⚠️ Worst Attendance Rate</option>
                 </select>
+              </div>
+
+              {/* Year Range Filter */}
+              <div className="flex items-center gap-2 border-l border-slate-200 pl-3">
+                <span className="text-xs text-slate-400 font-semibold font-mono">Years:</span>
+                <select
+                  value={filterYearType}
+                  onChange={(e) => setFilterYearType(e.target.value as 'join' | 'dob')}
+                  className="bg-slate-50 border border-slate-200 rounded-xl text-xs py-2 px-2.5 font-semibold text-slate-705 focus:outline-none focus:border-slate-400 cursor-pointer"
+                  title="Choose whether to filter by Join/Enrollment Year or Birth Year (DOB)"
+                >
+                  <option value="join">📅 Join Year</option>
+                  <option value="dob">🎂 Birth Year</option>
+                </select>
+                <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 focus-within:border-slate-400 transition-colors">
+                  <select
+                    value={filterYearStart}
+                    onChange={(e) => setFilterYearStart(e.target.value)}
+                    className="bg-transparent text-xs font-semibold text-slate-700 focus:outline-none cursor-pointer w-16"
+                    title="Minimum/Start Year"
+                  >
+                    <option key="start-placeholder" value="">Start</option>
+                    {availableYears.map(yr => (
+                      <option key={`start-yr-${yr}`} value={yr}>{yr}</option>
+                    ))}
+                  </select>
+                  <span className="text-[10px] text-slate-400 font-bold font-mono">-</span>
+                  <select
+                    value={filterYearEnd}
+                    onChange={(e) => setFilterYearEnd(e.target.value)}
+                    className="bg-transparent text-xs font-semibold text-slate-700 focus:outline-none cursor-pointer w-16"
+                    title="Maximum/End Year"
+                  >
+                    <option key="end-placeholder" value="">End</option>
+                    {availableYears.map(yr => (
+                      <option key={`end-yr-${yr}`} value={yr}>{yr}</option>
+                    ))}
+                  </select>
+                  {(filterYearStart || filterYearEnd) && (
+                    <button 
+                      type="button"
+                      onClick={() => { setFilterYearStart(''); setFilterYearEnd(''); }}
+                      className="text-slate-400 hover:text-slate-600 ml-1 cursor-pointer transition-colors"
+                      title="Clear year range"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Age Range & Bracket Filter */}
+              <div className="flex items-center gap-2 border-l border-slate-200 pl-3">
+                <span className="text-xs text-slate-400 font-semibold font-mono">Age Bracket:</span>
+                <select
+                  value={derivedAgeBracket}
+                  onChange={(e) => {
+                    const selected = AGE_BRACKETS.find(b => b.id === e.target.value);
+                    if (selected) {
+                      setFilterAgeStart(selected.min);
+                      setFilterAgeEnd(selected.max);
+                    }
+                  }}
+                  className="bg-slate-50 border border-slate-200 rounded-xl text-xs py-2 px-2.5 font-semibold text-slate-705 focus:outline-none focus:border-slate-400 cursor-pointer"
+                  title="Choose preset Age Bracket or edit exact years range"
+                >
+                  {AGE_BRACKETS.map(b => (
+                    <option key={`bracket-${b.id}`} value={b.id}>{b.label}</option>
+                  ))}
+                  {derivedAgeBracket === 'custom' && (
+                    <option key="bracket-custom" value="custom">⚙️ Custom Limits</option>
+                  )}
+                </select>
+
+                <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 focus-within:border-slate-400 transition-colors">
+                  <span className="text-[10px] text-slate-400 font-bold font-mono">Min:</span>
+                  <select
+                    value={filterAgeStart}
+                    onChange={(e) => setFilterAgeStart(e.target.value)}
+                    className="bg-transparent text-xs font-semibold text-slate-700 focus:outline-none cursor-pointer w-12"
+                    title="Minimum Age"
+                  >
+                    <option key="age-start-any" value="">Any</option>
+                    {Array.from({ length: 23 }, (_, i) => i + 3).map(age => (
+                      <option key={`age-start-val-${age}`} value={age}>{age}</option>
+                    ))}
+                  </select>
+                  <span className="text-[10px] text-slate-400 font-bold font-mono">Max:</span>
+                  <select
+                    value={filterAgeEnd}
+                    onChange={(e) => setFilterAgeEnd(e.target.value)}
+                    className="bg-transparent text-xs font-semibold text-slate-700 focus:outline-none cursor-pointer w-12"
+                    title="Maximum Age"
+                  >
+                    <option key="age-end-any" value="">Any</option>
+                    {Array.from({ length: 23 }, (_, i) => i + 3).map(age => (
+                      <option key={`age-end-val-${age}`} value={age}>{age}</option>
+                    ))}
+                  </select>
+                  {(filterAgeStart || filterAgeEnd) && (
+                    <button 
+                      type="button"
+                      onClick={() => { setFilterAgeStart(''); setFilterAgeEnd(''); }}
+                      className="text-slate-400 hover:text-slate-600 ml-1 cursor-pointer transition-colors"
+                      title="Clear age filters"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Status Flag Buttons */}
@@ -6868,7 +9435,7 @@ export default function App() {
               </p>
               <div className="mt-4 flex justify-center gap-3">
                 <button
-                  onClick={() => { setSearchQuery(''); setSelectedCohort('All Cohorts'); setSelectedFlag('all'); }}
+                  onClick={() => { setSearchQuery(''); setSelectedCohort('All Cohorts'); setSelectedVillage('All Villages'); setSelectedFlag('all'); }}
                   className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer"
                 >
                   Reset Active Filters
@@ -6891,18 +9458,59 @@ export default function App() {
                       Participant Details
                     </th>
                     {/* Compact Dynamic Date columns */}
-                    {sessions.map(session => (
-                      <th key={session.date} className="py-4 px-3 w-32 border-l border-slate-200/80 text-center select-none relative group">
-                        <div className="font-semibold text-slate-800">{formatToShortDayMonth(session.date)}</div>
-                        <div className="font-mono text-[9px] text-slate-400/90 font-normal mt-0.5 whitespace-nowrap">
-                          {session.label || 'Session'}
-                        </div>
-                        {/* Hover date details tooltip */}
-                        <div className="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-slate-900 text-white text-[10px] py-1 px-2.5 rounded shadow-lg whitespace-nowrap z-10 font-sans normal-case">
-                          Date: {formatToReadableDate(session.date)}
-                        </div>
-                      </th>
-                    ))}
+                    {sessions.map((session, sIdx) => {
+                      const isFullyMarked = activeParticipants.length > 0 && activeParticipants.every(p => {
+                        const status = attendance[p.id]?.[session.date];
+                        return status && status !== 'unmarked';
+                      });
+                      const isEmailed = emailedSessionDates.includes(session.date);
+                      return (
+                        <th key={`${session.date}-${sIdx}`} className="py-3 px-3 w-32 border-l border-slate-200/80 text-center select-none shadow-3xs hover:bg-slate-50/50 transition-colors relative group">
+                          <div className="font-semibold text-slate-800">{formatToShortDayMonth(session.date)}</div>
+                          <div className="font-mono text-[9px] text-slate-400/90 font-normal mt-0.5 whitespace-nowrap">
+                            {session.label || 'Session'}
+                          </div>
+                          
+                          {/* Interactive Email Dispatch Trigger Icon */}
+                          {isFullyMarked && (
+                            <div className="mt-1 flex items-center justify-center">
+                              {isEmailed ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEmailModalSelectedDate(session.date);
+                                    setIsEmailAlertModalOpen(true);
+                                  }}
+                                  className="text-emerald-600 hover:text-emerald-700 hover:scale-105 transition-all inline-flex items-center gap-1 py-0.5 px-1.5 rounded-md bg-emerald-50 border border-emerald-100 cursor-pointer"
+                                  title="Welfare Alert email has been successfully dispatched. Click to inspect or re-transmit."
+                                >
+                                  <CheckCircle className="h-2.5 w-2.5 shrink-0" />
+                                  <span className="text-[8.5px] font-bold font-mono tracking-wide uppercase">Sent</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEmailModalSelectedDate(session.date);
+                                    setIsEmailAlertModalOpen(true);
+                                  }}
+                                  className="text-amber-600 hover:text-indigo-650 hover:scale-105 transition-all inline-flex items-center gap-1 py-0.5 px-1.5 rounded-md bg-amber-50 border border-amber-200 cursor-pointer animate-pulse"
+                                  title="Welfare Alert email is pending! Click to dispatch this session report to staff."
+                                >
+                                  <Mail className="h-2.5 w-2.5 shrink-0" />
+                                  <span className="text-[8.5px] font-bold font-mono tracking-wide uppercase">Alert</span>
+                                </button>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Hover date details tooltip */}
+                          <div className="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-slate-900 text-white text-[10px] py-1 px-2.5 rounded shadow-lg whitespace-nowrap z-10 font-sans normal-case">
+                            Date: {formatToReadableDate(session.date)}
+                          </div>
+                        </th>
+                      );
+                    })}
                     {/* Inline Stats Overview */}
                     <th className="py-4 px-4 w-44 border-l border-slate-200/80 text-center select-none">
                       <button
@@ -6932,7 +9540,7 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-sm">
-                  {filteredParticipants.map((part) => {
+                  {filteredParticipants.map((part, partIdx) => {
                     const stats = getDashboardStats(part.id);
                     
                     // Style row highlight borders based on core policy requirements
@@ -6952,16 +9560,16 @@ export default function App() {
 
                     return (
                       <tr 
-                        key={part.id} 
+                        key={`${part.id}-${partIdx}`} 
                         className={`transition-colors group ${alertRowStyle} ${alertBorderColor}`}
                       >
                         {/* Participant Details Column (Sticky) */}
-                        <td className="p-4 px-6 sticky left-0 bg-white group-hover:bg-slate-50/60 z-2 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)] transition-colors">
-                          <div className="flex items-center gap-3">
+                        <td className="p-3 sm:p-4 px-3 sm:px-4 sticky left-0 bg-white group-hover:bg-slate-50/60 z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.06)] transition-colors min-w-[195px] sm:min-w-[260px] max-w-[215px] sm:max-w-[300px] select-none">
+                          <div className="flex items-center gap-2.5">
                             {/* Avatar */}
                             <div 
                               onClick={() => setSelectedParticipantId(part.id)}
-                              className={`h-9 w-9 rounded-xl border flex items-center justify-center font-bold text-xs uppercase cursor-pointer transition-transform hover:scale-105 select-none ${part.avatarColor} overflow-hidden`}
+                              className={`h-8 w-8 sm:h-9 sm:w-9 rounded-xl border flex items-center justify-center font-bold text-xs uppercase cursor-pointer transition-transform hover:scale-105 select-none ${part.avatarColor} overflow-hidden shrink-0`}
                             >
                               {part.photoUrl ? (
                                 <img src={part.photoUrl} alt={part.name} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
@@ -6972,10 +9580,10 @@ export default function App() {
                             
                             {/* Details clickable text to open Side-inspector info */}
                             <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-1.5 flex-wrap">
+                              <div className="flex items-center gap-1 flex-wrap">
                                 <span 
                                   onClick={() => setSelectedParticipantId(part.id)}
-                                  className="font-medium text-slate-900 hover:text-indigo-700 cursor-pointer transition-colors block truncate"
+                                  className="font-semibold text-slate-850 hover:text-indigo-700 cursor-pointer transition-colors block truncate max-w-[95px] sm:max-w-[160px]"
                                 >
                                   {part.name}
                                 </span>
@@ -7053,39 +9661,48 @@ export default function App() {
                         </td>
 
                         {/* Interactive dynamic cells */}
-                        {sessions.map(session => {
+                        {sessions.map((session, sIdx) => {
                           const status: AttendanceStatus = (attendance[part.id] && attendance[part.id][session.date]) || 'unmarked';
                           
                           // Style based on cell status values
                           let statusIcon = <HelpCircle className="h-3.5 w-3.5 text-slate-300" />;
-                          let cellBgClass = 'hover:bg-slate-100/50';
+                          let cellBgClass = isAdminMode ? 'hover:bg-slate-100/50' : '';
                           let titleText = `Toggle attendance: currently Unmarked`;
 
                           if (status === 'present') {
-                            statusIcon = <CheckCircle className="h-4.5 w-4.5 text-emerald-600 fill-emerald-50/50" />;
-                            cellBgClass = 'bg-emerald-50/15 hover:bg-emerald-50/30';
+                            statusIcon = <CheckCircle className={`h-4.5 w-4.5 ${isAdminMode ? 'text-emerald-600' : 'text-emerald-500/80'} fill-emerald-50/50`} />;
+                            cellBgClass = 'bg-emerald-50/15' + (isAdminMode ? ' hover:bg-emerald-50/30' : '');
                             titleText = `${part.name} Present on ${formatToShortDayMonth(session.date)}`;
                           } else if (status === 'absent') {
-                            statusIcon = <XCircle className="h-4.5 w-4.5 text-rose-55 fill-rose-50/40" />;
-                            cellBgClass = 'bg-rose-55/10 hover:bg-rose-100/30';
+                            statusIcon = <XCircle className={`h-4.5 w-4.5 ${isAdminMode ? 'text-rose-55' : 'text-rose-400/85'} fill-rose-50/40`} />;
+                            cellBgClass = 'bg-rose-55/10' + (isAdminMode ? ' hover:bg-rose-100/30' : '');
                             titleText = `${part.name} Absent on ${formatToShortDayMonth(session.date)}`;
                           } else if (status === 'excused') {
-                            statusIcon = <MinusCircle className="h-4.5 w-4.5 text-slate-500/80 fill-slate-100/50" />;
-                            cellBgClass = 'bg-slate-50 hover:bg-slate-100/40';
+                            statusIcon = <MinusCircle className={`h-4.5 w-4.5 ${isAdminMode ? 'text-slate-500/80' : 'text-slate-400/80'} fill-slate-100/50`} />;
+                            cellBgClass = 'bg-slate-50' + (isAdminMode ? ' hover:bg-slate-100/40' : '');
                             titleText = `${part.name} Excused on ${formatToShortDayMonth(session.date)}`;
+                          }
+
+                          if (!isAdminMode) {
+                            titleText += " (Locked - Unlock Admin Mode to alter)";
                           }
 
                           return (
                             <td 
-                              key={session.date} 
+                              key={`${session.date}-${sIdx}`} 
                               className={`p-3 text-center border-l border-slate-100/70 select-none ${cellBgClass} transition-colors relative group/cell`}
                             >
                               <div className="flex items-center justify-center">
                                 {/* Click to Cycle button */}
                                 <button
                                   type="button"
+                                  disabled={!isAdminMode}
                                   onClick={() => toggleAttendanceStatus(part.id, session.date)}
-                                  className="outline-none focus:ring-1 focus:ring-slate-350 p-1.5 rounded-lg transition-transform hover:scale-110 active:scale-95 cursor-pointer"
+                                  className={`outline-none p-1.5 rounded-lg transition-transform ${
+                                    isAdminMode 
+                                      ? "focus:ring-1 focus:ring-slate-350 hover:scale-110 active:scale-95 cursor-pointer" 
+                                      : "cursor-not-allowed opacity-75 pointer-events-none"
+                                  }`}
                                   title={titleText}
                                 >
                                   {statusIcon}
@@ -7093,65 +9710,90 @@ export default function App() {
                               </div>
 
                               {/* Small Popover Menu on Cell Hover for Quick Access to Explicit States */}
-                              <div className="opacity-0 group-hover/cell:opacity-100 pointer-events-none group-hover/cell:pointer-events-auto absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-slate-900 border border-slate-800 text-white rounded-lg p-1 shadow-md flex items-center gap-1.5 z-10 transition-all text-[10px]">
-                                <button 
-                                  onClick={() => setSpecificAttendance(part.id, session.date, 'present')} 
-                                  className={`px-1.5 py-0.5 rounded text-emerald-400 hover:bg-slate-800 font-medium ${status === 'present' ? 'bg-slate-800 font-bold' : ''}`}
-                                >
-                                  Present
-                                </button>
-                                <button 
-                                  onClick={() => setSpecificAttendance(part.id, session.date, 'absent')} 
-                                  className={`px-1.5 py-0.5 rounded text-rose-450 hover:bg-slate-800 font-medium ${status === 'absent' ? 'bg-slate-800 font-bold' : ''}`}
-                                >
-                                  Absent
-                                </button>
-                                <button 
-                                  onClick={() => setSpecificAttendance(part.id, session.date, 'excused')} 
-                                  className={`px-1.5 py-0.5 rounded text-slate-400 hover:bg-slate-800 font-medium ${status === 'excused' ? 'bg-slate-800 font-bold' : ''}`}
-                                >
-                                  Excused
-                                </button>
-                                <button 
-                                  onClick={() => setSpecificAttendance(part.id, session.date, 'unmarked')} 
-                                  className={`px-1.5 py-0.5 rounded text-slate-400 hover:bg-slate-800 font-medium ${status === 'unmarked' ? 'bg-slate-800 font-bold' : ''}`}
-                                >
-                                  Clear
-                                </button>
-                              </div>
+                              {isAdminMode && (
+                                <div className="opacity-0 group-hover/cell:opacity-100 pointer-events-none group-hover/cell:pointer-events-auto absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 bg-slate-900 border border-slate-800 text-white rounded-lg p-1 shadow-md flex items-center gap-1.5 z-10 transition-all text-[10px]">
+                                  <button 
+                                    onClick={() => setSpecificAttendance(part.id, session.date, 'present')} 
+                                    className={`px-1.5 py-0.5 rounded text-emerald-400 hover:bg-slate-800 font-medium ${status === 'present' ? 'bg-slate-800 font-bold' : ''}`}
+                                  >
+                                    Present
+                                  </button>
+                                  <button 
+                                    onClick={() => setSpecificAttendance(part.id, session.date, 'absent')} 
+                                    className={`px-1.5 py-0.5 rounded text-rose-450 hover:bg-slate-800 font-medium ${status === 'absent' ? 'bg-slate-800 font-bold' : ''}`}
+                                  >
+                                    Absent
+                                  </button>
+                                  <button 
+                                    onClick={() => setSpecificAttendance(part.id, session.date, 'excused')} 
+                                    className={`px-1.5 py-0.5 rounded text-slate-400 hover:bg-slate-800 font-medium ${status === 'excused' ? 'bg-slate-800 font-bold' : ''}`}
+                                  >
+                                    Excused
+                                  </button>
+                                  <button 
+                                    onClick={() => setSpecificAttendance(part.id, session.date, 'unmarked')} 
+                                    className={`px-1.5 py-0.5 rounded text-slate-400 hover:bg-slate-800 font-medium ${status === 'unmarked' ? 'bg-slate-800 font-bold' : ''}`}
+                                  >
+                                    Clear
+                                  </button>
+                                </div>
+                              )}
                             </td>
                           );
                         })}
 
                         {/* Attendance percentage overview Column */}
-                        <td className="p-4 text-center border-l border-slate-100/70">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedParticipantId(part.id)}
-                            className="flex flex-col items-center justify-center mx-auto hover:bg-indigo-50/50 p-1.5 rounded-xl transition-all cursor-pointer border border-transparent hover:border-indigo-150 group/rate outline-hidden"
-                            title="Click to view full engagement analysis and details"
-                          >
-                            <span className="font-mono font-bold text-slate-800 text-xs flex items-center gap-1 group-hover/rate:text-indigo-700">
-                              {stats?.attendanceRate}%
-                              <TrendingUp className="h-3 w-3 text-indigo-550 opacity-60 group-hover/rate:opacity-100 group-hover/rate:scale-110 transition-all" />
-                            </span>
-                            
-                            {/* Fraction indicator */}
-                            <span className="text-[10px] text-slate-450 mt-0.5 block group-hover/rate:text-indigo-650">
-                              Absent: {stats?.totalAbsent}/{stats?.totalSessions}
-                            </span>
+                        <td className={`p-4 text-center border-l border-slate-100/70 ${stats && stats.attendanceRate < 80 && stats.totalSessions > 0 ? 'bg-rose-50/30' : ''}`}>
+                          <div className="flex flex-col items-center justify-center mx-auto">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedParticipantId(part.id)}
+                              className="flex flex-col items-center justify-center hover:bg-indigo-50/50 p-1.5 rounded-xl transition-all cursor-pointer border border-transparent hover:border-indigo-150 group/rate outline-hidden animate-fadeIn"
+                              title="Click to view full engagement analysis and details"
+                            >
+                              <span className={`font-mono font-bold text-xs flex items-center gap-1 ${stats && stats.attendanceRate < 80 && stats.totalSessions > 0 ? 'text-rose-700 font-extrabold' : 'text-slate-800'} group-hover/rate:text-indigo-700`}>
+                                {stats?.attendanceRate}%
+                                <TrendingUp className="h-3 w-3 text-indigo-550 opacity-60 group-hover/rate:opacity-100 group-hover/rate:scale-110 transition-all" />
+                              </span>
+                              
+                              {/* Fraction indicator */}
+                              <span className="text-[10px] text-slate-450 mt-0.5 block group-hover/rate:text-indigo-650">
+                                Absent: {stats?.totalAbsent}/{stats?.totalSessions}
+                              </span>
 
-                            {/* Alert labels helper */}
-                            {stats && stats.totalAbsent > 0 && (
-                              <div className="flex gap-1 mt-1">
-                                {stats.consecutiveAbsences >= 2 && (
-                                  <span className="text-[9px] px-1 bg-amber-100 text-amber-700 rounded font-bold font-mono">
-                                    {stats.consecutiveAbsences} Consec
-                                  </span>
-                                )}
-                              </div>
+                              {/* Alert labels helper */}
+                              {stats && stats.totalAbsent > 0 && (
+                                <div className="flex flex-col items-center gap-1 mt-1">
+                                  {stats.consecutiveAbsences >= 2 && (
+                                    <span className="text-[9px] px-1 bg-amber-100 text-amber-700 rounded font-bold font-mono">
+                                      {stats.consecutiveAbsences} Consec
+                                    </span>
+                                  )}
+                                  {stats.attendanceRate < 80 && (
+                                    <span className="text-[8px] px-1.5 py-0.2 bg-rose-100 text-rose-700 border border-rose-200 rounded-md font-bold uppercase tracking-tight scale-95 font-sans animate-pulse">
+                                      ⚠️ Low Attendance
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </button>
+
+                            {/* Quick intervention action button */}
+                            {stats && stats.attendanceRate < 80 && stats.totalSessions > 0 && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setQuickLogParticipantId(part.id);
+                                  setQuickLogNotes(`Rapid response home visit or phone check-in logged. Contacted caregiver regarding recent child enrollment attendance rate falling down to ${stats.attendanceRate}%.`);
+                                }}
+                                className="mt-1.5 px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white text-[9px] font-extrabold uppercase tracking-wider rounded-md transition-all shadow-3xs cursor-pointer hover:scale-102 flex items-center gap-1"
+                                title={`Click to quickly log a caregiver discussion for ${part.name}`}
+                              >
+                                📞 Quick Log
+                              </button>
                             )}
-                          </button>
+                          </div>
                         </td>
 
                       </tr>
@@ -7173,7 +9815,7 @@ export default function App() {
                     </td>
 
                     {/* Dynamic Date column summaries */}
-                    {sessions.map(session => {
+                    {sessions.map((session, sIdx) => {
                       let presentCount = 0;
                       let absentCount = 0;
                       let excusedCount = 0;
@@ -7191,7 +9833,7 @@ export default function App() {
 
                       return (
                         <td 
-                          key={`foot-${session.date}`} 
+                          key={`foot-${session.date}-${sIdx}`} 
                           className="p-3 text-center border-l border-slate-200 bg-slate-50/75 border-b border-slate-200 select-none"
                         >
                           <div className="flex flex-col items-center justify-center gap-1.5 py-1">
@@ -7299,7 +9941,10 @@ export default function App() {
 
             const matchesAlert = journalAlertFilter === 'all' || (journalAlertFilter === 'red_alert' && entry.stats?.hasRedFlag);
 
-            return matchesSearch && matchesStatus && matchesAlert;
+            const matchesStartDate = !journalStartDate || entry.log.date >= journalStartDate;
+            const matchesEndDate = !journalEndDate || entry.log.date <= journalEndDate;
+
+            return matchesSearch && matchesStatus && matchesAlert && matchesStartDate && matchesEndDate;
           });
 
           const totalEntries = allJournalEntries.length;
@@ -7349,52 +9994,98 @@ export default function App() {
               </div>
 
               {/* FILTERS TOOLBAR */}
-              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-3xs flex flex-col md:flex-row gap-4 items-stretch md:items-center justify-between">
-                <div className="flex-1 relative">
-                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Search logs by student name, ID, logged by, or note contents..."
-                    value={journalSearchQuery}
-                    onChange={(e) => setJournalSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-slate-50 hover:bg-slate-100/50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-slate-400 transition-all font-sans"
-                  />
-                  {journalSearchQuery && (
-                    <button 
-                      onClick={() => setJournalSearchQuery('')} 
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-650 cursor-pointer text-xs"
-                    >
-                      Clear
-                    </button>
-                  )}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-3xs space-y-3.5">
+                <div className="flex flex-col md:flex-row gap-4 items-stretch md:items-center justify-between">
+                  <div className="flex-1 relative">
+                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Search logs by student name, ID, logged by, or note contents..."
+                      value={journalSearchQuery}
+                      onChange={(e) => setJournalSearchQuery(e.target.value)}
+                      className="w-full pl-10 pr-4 py-2 bg-slate-50 hover:bg-slate-100/50 border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-slate-400 transition-all font-sans"
+                    />
+                    {journalSearchQuery && (
+                      <button 
+                        onClick={() => setJournalSearchQuery('')} 
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-650 cursor-pointer text-xs"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap gap-2.5">
+                    <div className="flex items-center gap-1.5 font-sans">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider font-mono">Status:</span>
+                      <select
+                        value={journalStatusFilter}
+                        onChange={(e) => setJournalStatusFilter(e.target.value as any)}
+                        className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-750 font-medium focus:outline-none cursor-pointer hover:bg-slate-100"
+                      >
+                        <option value="all">All States</option>
+                        <option value="pending">⏳ Pending Response</option>
+                        <option value="contacted">📞 In Discussion</option>
+                        <option value="resolved">✅ Resolved / Actioned</option>
+                      </select>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 font-sans">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider font-mono">Standing:</span>
+                      <select
+                        value={journalAlertFilter}
+                        onChange={(e) => setJournalAlertFilter(e.target.value as any)}
+                        className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-750 font-medium focus:outline-none cursor-pointer hover:bg-slate-100"
+                      >
+                        <option value="all">All Students</option>
+                        <option value="red_alert">🚨 Red Alert Standing Only</option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="flex flex-wrap gap-2.5">
-                  <div className="flex items-center gap-1.5 font-sans">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider font-mono">Status:</span>
-                    <select
-                      value={journalStatusFilter}
-                      onChange={(e) => setJournalStatusFilter(e.target.value as any)}
-                      className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-750 font-medium focus:outline-none cursor-pointer hover:bg-slate-100"
-                    >
-                      <option value="all">All States</option>
-                      <option value="pending">⏳ Pending Response</option>
-                      <option value="contacted">📞 In Discussion</option>
-                      <option value="resolved">✅ Resolved / Actioned</option>
-                    </select>
+                {/* DATE RANGE FILTER ROW */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <div className="flex items-center gap-1.5 font-sans">
+                      <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider font-mono">Date Range:</span>
+                    </div>
+                    
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="date"
+                        value={journalStartDate}
+                        onChange={(e) => setJournalStartDate(e.target.value)}
+                        className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-750 font-medium focus:outline-none cursor-pointer hover:bg-slate-100 font-sans"
+                      />
+                      <span className="text-slate-400 text-xs font-mono">to</span>
+                      <input
+                        type="date"
+                        value={journalEndDate}
+                        onChange={(e) => setJournalEndDate(e.target.value)}
+                        className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-750 font-medium focus:outline-none cursor-pointer hover:bg-slate-100 font-sans"
+                      />
+                    </div>
+
+                    {(journalStartDate || journalEndDate) && (
+                      <button
+                        onClick={() => {
+                          setJournalStartDate('');
+                          setJournalEndDate('');
+                        }}
+                        className="text-[11px] font-medium text-red-600 hover:text-red-750 bg-red-50 hover:bg-red-100/70 border border-red-100 rounded-lg px-2.5 py-1.5 transition-colors cursor-pointer flex items-center gap-1"
+                      >
+                        Reset Dates
+                      </button>
+                    )}
                   </div>
 
-                  <div className="flex items-center gap-1.5 font-sans">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider font-mono">Standing:</span>
-                    <select
-                      value={journalAlertFilter}
-                      onChange={(e) => setJournalAlertFilter(e.target.value as any)}
-                      className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-750 font-medium focus:outline-none cursor-pointer hover:bg-slate-100"
-                    >
-                      <option value="all">All Students</option>
-                      <option value="red_alert">🚨 Red Alert Standing Only</option>
-                    </select>
-                  </div>
+                  {(journalStartDate || journalEndDate) && (
+                    <div className="text-[11px] text-slate-500 bg-slate-100/50 border border-slate-200 rounded-lg px-2.5 py-1 font-sans">
+                      Filtering logs: <span className="font-mono text-indigo-700 font-semibold">{journalStartDate || 'Anytime'}</span> to <span className="font-mono text-indigo-700 font-semibold">{journalEndDate || 'Anytime'}</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -7412,7 +10103,7 @@ export default function App() {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-sans">
-                  {filteredJournalEntries.map((entry) => {
+                  {filteredJournalEntries.map((entry, entryIdx) => {
                     const p = entry.participant;
                     const log = entry.log;
                     const stats = entry.stats;
@@ -7433,7 +10124,7 @@ export default function App() {
 
                     return (
                       <div 
-                        key={log.id} 
+                        key={`journal-${entry.participant.id}-${entryIdx}`} 
                         className={`bg-white border rounded-2xl p-5 shadow-xs transition-all relative flex flex-col justify-between hover:shadow-md ${
                           log.status === 'pending'
                             ? 'border-l-4 border-l-rose-500'
@@ -7586,6 +10277,28 @@ export default function App() {
             )}
 
             {/* MAIN AI WORKSPACE PANEL */}
+            {/* AI REPORT FILTERS */}
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col md:flex-row items-end gap-4 shadow-3xs">
+              <div className="flex-1 space-y-1 w-full relative">
+                <label className="text-xs font-semibold text-slate-500 block">Report Start Date (Optional)</label>
+                <input
+                  type="date"
+                  value={aiReportStartDate}
+                  onChange={(e) => setAiReportStartDate(e.target.value)}
+                  className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs focus:border-indigo-500 focus:outline-none placeholder:text-slate-300 transition-colors"
+                />
+              </div>
+              <div className="flex-1 space-y-1 w-full relative">
+                <label className="text-xs font-semibold text-slate-500 block">Report End Date (Optional)</label>
+                <input
+                  type="date"
+                  value={aiReportEndDate}
+                  onChange={(e) => setAiReportEndDate(e.target.value)}
+                  className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs focus:border-indigo-500 focus:outline-none placeholder:text-slate-300 transition-colors"
+                />
+              </div>
+            </div>
+
             {!aiCohortReport && !aiReportLoading ? (
               <div className="bg-white border border-slate-200 rounded-3xl p-8 text-center space-y-5 shadow-2xs">
                 <div className="h-16 w-16 bg-indigo-50 border border-indigo-100 rounded-2xl flex items-center justify-center mx-auto shadow-3xs">
@@ -7660,7 +10373,13 @@ export default function App() {
                       <span>Download Official Letterhead PDF</span>
                     </button>
                     <button
-                      onClick={() => window.print()}
+                      onClick={() => {
+                        try {
+                          window.print();
+                        } catch (err) {
+                          console.warn("Window printing not supported in iframe sandbox:", err);
+                        }
+                      }}
                       className="bg-slate-900 border border-slate-950 text-white hover:bg-black font-extrabold text-[11px] px-3.5 py-1.5 rounded-xl transition-all cursor-pointer flex items-center gap-1 shrink-0 shadow-3xs"
                     >
                       Print Summary
@@ -7671,7 +10390,7 @@ export default function App() {
                 {/* TWO COLUMN SUMMARY ANALYSIS */}
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                   {/* Executive Brief Card */}
-                  <div className="lg:col-span-2 bg-white border border-slate-200 rounded-3xl p-6 space-y-4 shadow-3xs">
+                  <div className="lg:col-span-2 bg-white border border-slate-200 rounded-3xl p-6 space-y-4 shadow-3xs hover:shadow-2xs transition-shadow">
                     <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
                       <Brain className="w-5 h-5 text-indigo-650" />
                       <h3 className="text-sm font-bold text-slate-900 font-sans tracking-tight">
@@ -7684,19 +10403,277 @@ export default function App() {
                   </div>
 
                   {/* Risks Segment Card */}
-                  <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-4 shadow-3xs">
+                  <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-4 shadow-3xs hover:shadow-2xs transition-shadow">
                     <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
                       <AlertTriangle className="w-5 h-5 text-indigo-650" />
                       <h3 className="text-sm font-bold text-slate-900 font-sans tracking-tight">
                         Cohort Welfare Segments
                       </h3>
                     </div>
-                    <p className="text-xs text-slate-650 leading-relaxed font-sans whitespace-pre-line border-b border-slate-100 pb-3">
+                    <p className="text-xs text-slate-650 leading-relaxed font-sans whitespace-pre-line border-b border-slate-100 pb-2">
                       {aiCohortReport.overallRiskDistribution}
                     </p>
-                    <div className="bg-indigo-50/50 p-3 rounded-2xl border border-indigo-100 text-[10.5px] text-indigo-750 font-sans leading-normal">
-                      💡 <b>Insight:</b> Use the student table below to filter active warnings or jump into individual casework logs.
+                    <div className="bg-indigo-50/50 p-3 rounded-xl border border-indigo-100 text-[10px] text-indigo-750 font-sans leading-normal">
+                      💡 <b>Insight:</b> Filter the advisory listing block at the bottom to check customized actions for red-flag cases.
                     </div>
+                  </div>
+                </div>
+
+                {/* GRAPHICAL COMPARATIVE DASHBOARD INTERFACE */}
+                {(() => {
+                  const activeList = activeParticipants;
+                  const total = activeList.length;
+                  const statsPrecomputed = (() => {
+                    if (total === 0) return { cohorts: [], villages: [], genders: [], schooling: [] };
+
+                    const cohortData: Record<string, { count: number; sumAttendance: number; redFlags: number; totalScores: number; countScores: number }> = {};
+                    const villageData: Record<string, { count: number; sumAttendance: number; redFlags: number }> = {};
+                    const genderData: Record<string, { count: number; sumAttendance: number; redFlags: number; totalScores: number; countScores: number }> = {};
+                    const schoolingData: Record<string, { count: number; sumAttendance: number; totalScores: number; countScores: number }> = {};
+
+                    activeList.forEach(p => {
+                      const stats = participantStatsMap[p.id] || { attendanceRate: 100, hasRedFlag: false };
+                      const attendanceVal = stats.attendanceRate;
+
+                      const schoolForm = p.scannedForms?.find(f => f.formType === 'school')?.extractedData?.school;
+                      const scoreVal = schoolForm?.averageScorePercentage;
+
+                      const c = p.cohort || 'General';
+                      if (!cohortData[c]) cohortData[c] = { count: 0, sumAttendance: 0, redFlags: 0, totalScores: 0, countScores: 0 };
+                      cohortData[c].count += 1;
+                      cohortData[c].sumAttendance += attendanceVal;
+                      if (stats.hasRedFlag) cohortData[c].redFlags += 1;
+                      if (typeof scoreVal === 'number') {
+                        cohortData[c].totalScores += scoreVal;
+                        cohortData[c].countScores += 1;
+                      }
+
+                      const v = p.village || 'Other';
+                      if (!villageData[v]) villageData[v] = { count: 0, sumAttendance: 0, redFlags: 0 };
+                      villageData[v].count += 1;
+                      villageData[v].sumAttendance += attendanceVal;
+                      if (stats.hasRedFlag) villageData[v].redFlags += 1;
+
+                      const g = p.gender || 'N/A';
+                      if (!genderData[g]) genderData[g] = { count: 0, sumAttendance: 0, redFlags: 0, totalScores: 0, countScores: 0 };
+                      genderData[g].count += 1;
+                      genderData[g].sumAttendance += attendanceVal;
+                      if (stats.hasRedFlag) genderData[g].redFlags += 1;
+                      if (typeof scoreVal === 'number') {
+                        genderData[g].totalScores += scoreVal;
+                        genderData[g].countScores += 1;
+                      }
+
+                      const s = p.schoolingStatus || 'Not Specified';
+                      if (!schoolingData[s]) schoolingData[s] = { count: 0, sumAttendance: 0, totalScores: 0, countScores: 0 };
+                      schoolingData[s].count += 1;
+                      schoolingData[s].sumAttendance += attendanceVal;
+                      if (typeof scoreVal === 'number') {
+                        schoolingData[s].totalScores += scoreVal;
+                        schoolingData[s].countScores += 1;
+                      }
+                    });
+
+                    return {
+                      cohorts: Object.entries(cohortData).map(([name, d]) => ({
+                        name,
+                        "Attendees Logged": d.count,
+                        "Avg Attendance %": Math.round(d.sumAttendance / d.count),
+                        "Red Warning Flags": d.redFlags,
+                        "Avg Academic Exam %": d.countScores > 0 ? Math.round(d.totalScores / d.countScores) : 0
+                      })),
+                      villages: Object.entries(villageData).map(([name, d]) => ({
+                        name,
+                        "Attendees Logged": d.count,
+                        "Avg Attendance %": Math.round(d.sumAttendance / d.count),
+                        "Red Warning Flags": d.redFlags
+                      })),
+                      genders: Object.entries(genderData).map(([name, d]) => ({
+                        name,
+                        "Attendees Logged": d.count,
+                        "Avg Attendance %": Math.round(d.sumAttendance / d.count),
+                        "Red Warning Flags": d.redFlags,
+                        "Avg Academic Exam %": d.countScores > 0 ? Math.round(d.totalScores / d.countScores) : 0
+                      })),
+                      schooling: Object.entries(schoolingData).map(([name, d]) => ({
+                        name,
+                        "Attendees Logged": d.count,
+                        "Avg Attendance %": Math.round(d.sumAttendance / d.count),
+                        "Avg Academic Exam %": d.countScores > 0 ? Math.round(d.totalScores / d.countScores) : 0
+                      }))
+                    };
+                  })();
+
+                  const chartData = statsPrecomputed[activeStatsTab];
+
+                  return (
+                    <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-5 shadow-3xs hover:shadow-2xs transition-shadow">
+                      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-3 border-b border-slate-100">
+                        <div className="space-y-1">
+                          <h3 className="text-sm font-bold text-slate-905 flex items-center gap-2 font-sans">
+                            <TrendingUp className="w-5 h-5 text-indigo-600" />
+                            <span>Interactive Cohort Ratios & Subgroup Comparator</span>
+                          </h3>
+                          <p className="text-[10.5px] text-slate-500 font-sans">
+                            Toggle dimensions below to view computed mathematical aggregations matched with the AI's respective analytical brief.
+                          </p>
+                        </div>
+                        
+                        {/* Interactive dimension selectors */}
+                        <div className="inline-flex items-center gap-1.5 p-1 rounded-xl bg-slate-50 border border-slate-150 relative z-2 self-stretch sm:self-auto overflow-x-auto shrink-0">
+                          {(['cohorts', 'villages', 'genders', 'schooling'] as const).map(tab => (
+                            <button
+                              key={tab}
+                              onClick={() => setActiveStatsTab(tab)}
+                              className={`px-3 py-1.5 text-[10.5px] font-extrabold capitalize rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                                activeStatsTab === tab
+                                  ? 'bg-white text-indigo-655 shadow-xs border border-slate-205'
+                                  : 'text-slate-500 hover:text-slate-800'
+                              }`}
+                            >
+                              {tab}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-stretch">
+                        {/* CHART VISUALIZER STAGE */}
+                        <div className="lg:col-span-2 space-y-2">
+                          <div className="h-68 block min-h-[270px]">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <BarChart data={chartData} margin={{ top: 15, right: 10, left: -25, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                <XAxis dataKey="name" stroke="#94a3b8" fontSize={9.5} tickLine={false} axisLine={false} />
+                                <YAxis stroke="#94a3b8" fontSize={9.5} tickLine={false} axisLine={false} domain={[0, 100]} />
+                                <Tooltip
+                                  contentStyle={{ backgroundColor: '#ffffff', borderRadius: 12, borderColor: '#e2e8f0', fontFamily: 'sans-serif', fontSize: 11 }}
+                                  cursor={{ fill: '#f8fafc' }}
+                                />
+                                <Legend wrapperStyle={{ fontSize: 10.5, fontFamily: 'sans-serif', paddingTop: 10 }} />
+                                
+                                <Bar dataKey="Avg Attendance %" fill="#4f46e5" radius={[4, 4, 0, 0]} barSize={28}>
+                                  {chartData.map((entry, index) => (
+                                    <Cell key={`cell-att-${index}`} fill={index % 2 === 0 ? "#4f46e5" : "#6366f1"} />
+                                  ))}
+                                </Bar>
+                                
+                                {activeStatsTab !== 'villages' && (
+                                  <Bar dataKey="Avg Academic Exam %" fill="#e0f2fe" radius={[4, 4, 0, 0]} barSize={28}>
+                                    {chartData.map((entry, index) => (
+                                      <Cell key={`cell-acad-${index}`} fill="#fbbf24" stroke="#d97706" strokeWidth={0.5} />
+                                    ))}
+                                  </Bar>
+                                )}
+
+                                {activeStatsTab !== 'schooling' && (
+                                  <Bar dataKey="Red Warning Flags" fill="#fecdd3" radius={[4, 4, 0, 0]} barSize={20}>
+                                    {chartData.map((entry, index) => (
+                                      <Cell key={`cell-flags-${index}`} fill="#ef4444" />
+                                    ))}
+                                  </Bar>
+                                )}
+                              </BarChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+
+                        {/* INTERPRETATION BRIEF CARD */}
+                        <div className="bg-slate-50/50 rounded-2xl p-5 border border-slate-150 flex flex-col justify-between">
+                          <div className="space-y-3.5">
+                            <div className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md">
+                              🖋️ Gemini Interpretation Side-Brief
+                            </div>
+                            <h4 className="text-xs font-bold text-slate-800 font-sans">
+                              {activeStatsTab === 'cohorts' && "Cohort Participation & Progress Variables"}
+                              {activeStatsTab === 'villages' && "Village Spatial Layout Accessibility Insights"}
+                              {activeStatsTab === 'genders' && "Gender Attendance & Performance Contrasts"}
+                              {activeStatsTab === 'schooling' && "Schooling Type Engagement Analysis"}
+                            </h4>
+                            <p className="text-[11px] text-slate-650 leading-relaxed font-sans italic">
+                              {activeStatsTab === 'cohorts' && "This chart compares average attendance rates, general participant sizes, red warning alerts, and computed terminal examination ratings across registered cohort groups, tracking relative academic progress levels."}
+                              {activeStatsTab === 'villages' && (aiCohortReport.systemStats?.villageBreakdown || "No village assessment generated.")}
+                              {activeStatsTab === 'genders' && (aiCohortReport.systemStats?.genderComparison || "No gender evaluation generated.")}
+                              {activeStatsTab === 'schooling' && (aiCohortReport.systemStats?.schoolingImpact || "No schooling impact generated.")}
+                            </p>
+                          </div>
+                          
+                          <div className="pt-4 border-t border-slate-200/55 text-[9.5px] text-slate-400 font-mono">
+                            COMPARATIVE DIMENSION: {activeStatsTab.toUpperCase()}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* THE DETAILS-BASED NARRATIVE ANALYSIS */}
+                <div className="bg-white border border-slate-200 rounded-3xl p-6 space-y-4.5 shadow-3xs hover:shadow-2xs transition-shadow">
+                  <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
+                    <TrendingUp className="w-5 h-5 text-indigo-650 animate-pulse" />
+                    <h3 className="text-sm font-bold text-slate-900 font-sans tracking-tight">
+                      Roster Analytical Demographics & Comparative Ratios
+                    </h3>
+                  </div>
+                  <div className="text-xs text-slate-650 leading-relaxed font-sans space-y-4 markdown-body">
+                    {aiCohortReport.comparativeAnalysis ? (
+                      aiCohortReport.comparativeAnalysis.split('\n\n').map((para, i) => (
+                        <p key={`comp-para-${i}`} className="whitespace-pre-line leading-relaxed">
+                          {para}
+                        </p>
+                      ))
+                    ) : (
+                      <p className="italic text-slate-450">Empty comparative analysis narration.</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* STRATEGIC LEVEL SYSTEM RECOMMENDATIONS */}
+                <div className="bg-gradient-to-b from-slate-900 to-indigo-950 text-white rounded-3xl p-6 sm:p-8 space-y-6 shadow-md border border-slate-150/10">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-4 border-b border-white/10">
+                    <div className="space-y-1">
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2 font-sans">
+                        <Zap className="w-5 h-5 text-amber-300" />
+                        <span>Tactical Program Strategic Initiatives & Welfare Recommendations</span>
+                      </h3>
+                      <p className="text-xs text-slate-300 font-sans">
+                        System-wide structural recommendations provided at the end of the compiled Gemini Cohort-Wide report.
+                      </p>
+                    </div>
+                    <div className="px-3 py-1 rounded-full bg-slate-800 text-[10px] font-bold text-amber-300 border border-slate-700 font-mono shrink-0 uppercase tracking-widest">
+                      {aiCohortReport.strategicRecommendations?.length || 0} Mandates Formulated
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                    {aiCohortReport.strategicRecommendations?.map((rec, rIdx) => (
+                      <div key={`rec-card-${rIdx}`} className="bg-white/[0.03] hover:bg-white/[0.06] border border-white/10 rounded-2xl p-5 space-y-3.5 flex flex-col justify-between transition-colors">
+                        <div className="space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9.5px] font-bold tracking-wider font-mono text-indigo-300 bg-indigo-500/15 px-2.5 py-1 rounded-lg border border-indigo-500/25 uppercase">
+                              {rec.category || "General Intervention"}
+                            </span>
+                            <span className={`text-[9.5px] font-extrabold px-2 py-0.5 rounded ${
+                              rec.priority === 'High' 
+                                ? 'bg-rose-500/15 text-rose-350 border border-rose-500/25'
+                                : rec.priority === 'Medium'
+                                  ? 'bg-amber-500/15 text-amber-305 border border-amber-500/25'
+                                  : 'bg-emerald-500/15 text-emerald-305 border border-emerald-500/25'
+                            }`}>
+                              {rec.priority} Priority
+                            </span>
+                          </div>
+                          
+                          <h4 className="text-xs font-bold leading-snug font-sans text-slate-100">
+                            {rec.initiative}
+                          </h4>
+                          
+                          <p className="text-[11px] text-slate-350 leading-relaxed font-sans">
+                            {rec.rationale}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
@@ -7718,12 +10695,12 @@ export default function App() {
 
                   <div className="divide-y divide-slate-100 overflow-x-auto">
                     {/* List matching all reported students */}
-                    {aiCohortReport.studentReports?.map((item) => {
+                    {aiCohortReport.studentReports?.map((item, idx) => {
                       const origPat = participants.find(p => p.id === item.participantId);
                       const stats = origPat ? participantStatsMap[origPat.id] : null;
 
                       return (
-                        <div key={item.participantId} className="p-5 hover:bg-slate-50/50 transition-colors flex flex-col md:flex-row items-start md:items-center gap-4 justify-between">
+                        <div key={`${item.participantId || 'unknown'}-${idx}`} className="p-5 hover:bg-slate-50/50 transition-colors flex flex-col md:flex-row items-start md:items-center gap-4 justify-between">
                           <div className="space-y-2 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                               {origPat?.avatarColor && (
@@ -7905,106 +10882,225 @@ export default function App() {
               </div>
             </div>
 
-            {/* OVERALL ATTENDANCE RATE TREND BAR CHART */}
-            <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-2xs">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-                <div>
-                  <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                    <TrendingUp className="w-5 h-5 text-indigo-600" />
-                    Overall Attendance Rate Trend
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Analyzing participation standing of all students across past and present sessions.
-                  </p>
+            {/* ANALYTICS CHARTS GRID */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* OVERALL ATTENDANCE RATE TREND BAR CHART */}
+              <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-2xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                      <TrendingUp className="w-5 h-5 text-indigo-600" />
+                      Overall Attendance Rate Trend
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Analyzing participation standing of all students across past and present sessions.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-700 text-[10px] font-bold">
+                      {sessions.length} sessions tracked
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">
+                      Avg: {overallAttendanceRate}% Rating
+                    </span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-700 text-[10px] font-bold">
-                    {sessions.length} sessions tracked
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">
-                    Avg: {overallAttendanceRate}% Rating
-                  </span>
-                </div>
-              </div>
 
-              {sessionsTrendData.length === 0 ? (
-                <div className="py-12 text-center text-slate-400 italic text-xs">
-                  No sessions created yet to compute attendance rate trend analytics.
-                </div>
-              ) : (
-                <div className="h-72 w-full font-sans text-xs">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart
-                      data={sessionsTrendData}
-                      margin={{ top: 10, right: 10, left: -25, bottom: 5 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                      <XAxis 
-                        dataKey="shortDate" 
-                        stroke="#94a3b8" 
-                        fontSize={10} 
-                        tickLine={false} 
-                        axisLine={false}
-                      />
-                      <YAxis 
-                        stroke="#94a3b8" 
-                        fontSize={10} 
-                        tickLine={false} 
-                        axisLine={false}
-                        domain={[0, 100]}
-                        tickFormatter={(v) => `${v}%`}
-                      />
-                      <Tooltip
-                        content={({ active, payload }) => {
-                          if (active && payload && payload.length) {
-                            const data = payload[0].payload;
-                            return (
-                              <div className="bg-slate-900 text-white rounded-xl p-3 shadow-lg border border-slate-800 space-y-1 text-[11px] font-sans">
-                                <p className="font-bold border-b border-white/10 pb-1 mb-1.5 text-indigo-300">
-                                  {data.label} ({formatToReadableDate(data.date)})
-                                </p>
-                                <div className="space-y-0.5 font-sans">
-                                  <div className="flex justify-between gap-6">
-                                    <span className="text-slate-400">Attendance Rate:</span>
-                                    <span className="font-extrabold text-amber-300">{data.attendanceRate}%</span>
-                                  </div>
-                                  <div className="flex justify-between gap-6">
-                                    <span className="text-slate-400">Total Checked:</span>
-                                    <span className="font-bold text-slate-200">{data.totalStudents} students</span>
-                                  </div>
-                                  <div className="flex justify-between gap-6 pt-1 border-t border-white/5 mt-1 text-[10px]">
-                                    <span className="text-emerald-400">Present (Excused):</span>
-                                    <span>{data.present + data.excused}</span>
-                                  </div>
-                                  <div className="flex justify-between gap-6 text-[10px]">
-                                    <span className="text-rose-300">Absent:</span>
-                                    <span>{data.absent}</span>
+                {sessionsTrendData.length === 0 ? (
+                  <div className="py-12 text-center text-slate-400 italic text-xs">
+                    No sessions created yet to compute attendance rate trend analytics.
+                  </div>
+                ) : (
+                  <div className="h-72 w-full font-sans text-xs">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={sessionsTrendData}
+                        margin={{ top: 10, right: 10, left: -25, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                        <XAxis 
+                          dataKey="shortDate" 
+                          stroke="#94a3b8" 
+                          fontSize={10} 
+                          tickLine={false} 
+                          axisLine={false}
+                        />
+                        <YAxis 
+                          stroke="#94a3b8" 
+                          fontSize={10} 
+                          tickLine={false} 
+                          axisLine={false}
+                          domain={[0, 100]}
+                          tickFormatter={(v) => `${v}%`}
+                        />
+                        <Tooltip
+                          content={({ active, payload }) => {
+                            if (active && payload && payload.length) {
+                              const data = payload[0].payload;
+                              return (
+                                <div className="bg-slate-900 text-white rounded-xl p-3 shadow-lg border border-slate-800 space-y-1 text-[11px] font-sans">
+                                  <p className="font-bold border-b border-white/10 pb-1 mb-1.5 text-indigo-300">
+                                    {data.label} ({formatToReadableDate(data.date)})
+                                  </p>
+                                  <div className="space-y-0.5 font-sans">
+                                    <div className="flex justify-between gap-6">
+                                      <span className="text-slate-400">Attendance Rate:</span>
+                                      <span className="font-extrabold text-amber-300">{data.attendanceRate}%</span>
+                                    </div>
+                                    <div className="flex justify-between gap-6">
+                                      <span className="text-slate-400">Total Checked:</span>
+                                      <span className="font-bold text-slate-200">{data.totalStudents} students</span>
+                                    </div>
+                                    <div className="flex justify-between gap-6 pt-1 border-t border-white/5 mt-1 text-[10px]">
+                                      <span className="text-emerald-400">Present (Excused):</span>
+                                      <span>{data.present + data.excused}</span>
+                                    </div>
+                                    <div className="flex justify-between gap-6 text-[10px]">
+                                      <span className="text-rose-300">Absent:</span>
+                                      <span>{data.absent}</span>
+                                    </div>
                                   </div>
                                 </div>
-                              </div>
-                            );
-                          }
-                          return null;
-                        }}
-                      />
-                      <Bar 
-                        dataKey="attendanceRate" 
-                        radius={[6, 6, 0, 0]}
-                        maxBarSize={45}
+                              );
+                            }
+                            return null;
+                          }}
+                        />
+                        <Bar 
+                          dataKey="attendanceRate" 
+                          radius={[6, 6, 0, 0]}
+                          maxBarSize={45}
+                        >
+                          {sessionsTrendData.map((entry, index) => {
+                            const rate = entry.attendanceRate;
+                            let barColor = '#4f46e5'; // default indigo-600
+                            if (rate >= 80) barColor = '#10b981'; // emerald-500
+                            else if (rate >= 50) barColor = '#f59e0b'; // amber-500
+                            else if (rate > 0) barColor = '#ef4444'; // red-500
+                            return <Cell key={`cell-${index}`} fill={barColor} />;
+                          })}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </div>
+
+              {/* COHORT 7-DAY ROLLING ATTENDANCE AVERAGE LINE CHART */}
+              <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-2xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                      <TrendingUp className="w-5 h-5 text-indigo-650" />
+                      Cohort 7-Day Rolling Average
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      7-day attendance smoothed rate trend for cohort: <span className="font-semibold text-indigo-700">{selectedCohort || 'All Cohorts'}</span>
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
+                      {cohortRollingTrendData.length} sessions
+                    </span>
+                    {cohortRollingTrendData.length > 0 && (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-700 text-[10px] font-bold">
+                        Latest: {cohortRollingTrendData[cohortRollingTrendData.length - 1].rollingAverage}%
+                      </span>
+                    )}
+                    {cohortRollingTrendData.length > 0 && (
+                      <button
+                        onClick={handleDownloadRollingCSV}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 hover:border-emerald-300 text-emerald-700 text-[10px] font-extrabold transition-all cursor-pointer shadow-3xs"
+                        title="Download CSV report of 7-day rolling attendance trend"
                       >
-                        {sessionsTrendData.map((entry, index) => {
-                          const rate = entry.attendanceRate;
-                          let barColor = '#4f46e5'; // default indigo-600
-                          if (rate >= 80) barColor = '#10b981'; // emerald-500
-                          else if (rate >= 50) barColor = '#f59e0b'; // amber-500
-                          else if (rate > 0) barColor = '#ef4444'; // red-500
-                          return <Cell key={`cell-${index}`} fill={barColor} />;
-                        })}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
+                        <Download className="w-3 h-3 text-emerald-600" />
+                        Download CSV
+                      </button>
+                    )}
+                  </div>
                 </div>
-              )}
+
+                {cohortRollingTrendData.length === 0 ? (
+                  <div className="py-12 text-center text-slate-400 italic text-xs">
+                    No session data available for cohort style average chart.
+                  </div>
+                ) : (
+                  <div className="h-72 w-full font-sans text-xs">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart
+                        data={cohortRollingTrendData}
+                        margin={{ top: 10, right: 10, left: -25, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                        <XAxis 
+                          dataKey="shortDate" 
+                          stroke="#94a3b8" 
+                          fontSize={10} 
+                          tickLine={false} 
+                          axisLine={false}
+                        />
+                        <YAxis 
+                          stroke="#94a3b8" 
+                          fontSize={10} 
+                          tickLine={false} 
+                          axisLine={false}
+                          domain={[0, 100]}
+                          tickFormatter={(v) => `${v}%`}
+                        />
+                        <Tooltip
+                          content={({ active, payload }) => {
+                            if (active && payload && payload.length) {
+                              const data = payload[0].payload;
+                              return (
+                                <div className="bg-slate-900 text-white rounded-xl p-3 shadow-lg border border-slate-800 space-y-1.5 text-[11px] font-sans">
+                                  <p className="font-bold border-b border-white/10 pb-1 mb-1.5 text-indigo-300">
+                                    {data.label} ({formatToReadableDate(data.date)})
+                                  </p>
+                                  <div className="space-y-0.5 font-sans">
+                                    <div className="flex justify-between gap-6">
+                                      <span className="text-slate-400">7-Day Rolling Avg:</span>
+                                      <span className="font-extrabold text-indigo-300">{data.rollingAverage}%</span>
+                                    </div>
+                                    <div className="flex justify-between gap-6">
+                                      <span className="text-slate-400">Daily Session Rate:</span>
+                                      <span className="font-bold text-slate-300">{data.singleSessionRate}%</span>
+                                    </div>
+                                    <div className="flex justify-between gap-6 text-[10px] pt-1 mt-1 border-t border-white/5">
+                                      <span className="text-slate-400">Sessions in 7d Window:</span>
+                                      <span>{data.sessionsInWindowCount}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            }
+                            return null;
+                          }}
+                        />
+                        <Legend verticalAlign="top" height={36} iconType="circle" />
+                        <Line
+                          type="monotone"
+                          dataKey="singleSessionRate"
+                          name="Daily Session Rate"
+                          stroke="#cbd5e1"
+                          strokeWidth={1.5}
+                          strokeDasharray="4 4"
+                          dot={{ r: 2 }}
+                          activeDot={{ r: 4 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="rollingAverage"
+                          name="7-Day Rolling Average"
+                          stroke="#4f46e5"
+                          strokeWidth={3}
+                          dot={{ r: 4, strokeWidth: 1 }}
+                          activeDot={{ r: 6 }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* COHORT ATTENDANCE COMPARISON SECTION */}
@@ -8189,7 +11285,7 @@ export default function App() {
                     </h4>
 
                     <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-                      {cohortComparisonData.map(c => {
+                      {cohortComparisonData.map((c, cIdx) => {
                         let statusText = 'Excellent';
                         let badgeColor = 'bg-emerald-50 text-emerald-800 border-emerald-250';
                         if (c.overallRate < 60) {
@@ -8202,7 +11298,7 @@ export default function App() {
 
                         return (
                           <div 
-                            key={c.cohort} 
+                            key={`${c.cohort}-${cIdx}`} 
                             className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col justify-between gap-2.5 hover:shadow-3xs transition-shadow"
                           >
                             <div className="flex items-start justify-between gap-2">
@@ -8278,11 +11374,11 @@ export default function App() {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {sessions.map((s) => {
+                  {sessions.map((s, sIdx) => {
                     const isEditing = editingSessionOriginalDate === s.date;
                     return (
                       <div 
-                        key={s.date} 
+                        key={`${s.date}-${sIdx}`} 
                         className={`p-4 border rounded-2xl relative transition-all flex flex-col justify-between ${
                           isEditing 
                             ? 'border-indigo-500 bg-indigo-50/25 ring-1 ring-indigo-550/20 shadow-xs' 
@@ -8363,22 +11459,31 @@ export default function App() {
                               <span className="text-[10px] font-mono text-slate-450">
                                 {formatToReadableDate(s.date)}
                               </span>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (!isAdminMode) {
-                                    alert("Session modifications are restricted. Please unlock Admin Mode to modify system records.");
-                                    setIsPasscodeFieldOpen(true);
-                                    return;
-                                  }
-                                  setEditingSessionOriginalDate(s.date);
-                                  setEditSessionDate(s.date);
-                                  setEditSessionLabel(s.label);
-                                }}
-                                className="text-[11px] text-indigo-600 hover:text-indigo-805 hover:underline font-bold cursor-pointer"
-                              >
-                                Edit Details ➔
-                              </button>
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedSessionDate(s.date)}
+                                  className="text-[11px] text-emerald-600 hover:text-emerald-805 hover:underline font-bold cursor-pointer"
+                                >
+                                  Inspect ➔
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (!isAdminMode) {
+                                      alert("Session modifications are restricted. Please unlock Admin Mode to modify system records.");
+                                      setIsPasscodeFieldOpen(true);
+                                      return;
+                                    }
+                                    setEditingSessionOriginalDate(s.date);
+                                    setEditSessionDate(s.date);
+                                    setEditSessionLabel(s.label);
+                                  }}
+                                  className="text-[11px] text-indigo-600 hover:text-indigo-805 hover:underline font-bold cursor-pointer"
+                                >
+                                  Edit ➔
+                                </button>
+                              </div>
                             </div>
                           </div>
                         )}
@@ -8451,6 +11556,28 @@ export default function App() {
                   <span className="text-xs bg-indigo-50 text-indigo-700 font-bold px-2.5 py-1 rounded-full">{activeParticipants.length} active</span>
                 </div>
 
+                {/* Search Active Registry */}
+                <div className="p-3 bg-slate-50/50 border-b border-slate-150 flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Search active roster by name or ID..."
+                      value={adminActiveSearchQuery}
+                      onChange={(e) => setAdminActiveSearchQuery(e.target.value)}
+                      className="w-full pl-8 pr-12 py-1.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 placeholder:text-slate-450 focus:outline-none focus:border-slate-400 font-sans"
+                    />
+                    {adminActiveSearchQuery && (
+                      <button 
+                        onClick={() => setAdminActiveSearchQuery('')} 
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] bg-slate-150 hover:bg-slate-200 text-slate-600 rounded px-1.5 py-0.5 tracking-tight font-medium"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
                 <div className="overflow-x-auto">
                   {activeParticipants.length === 0 ? (
                     <div className="p-10 text-center">
@@ -8467,55 +11594,75 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {sortedActiveParticipants.map(part => (
-                          <tr key={part.id} className="hover:bg-slate-50/60 transition-colors">
-                            <td className="p-3 pl-5">
-                              <div className="flex items-center gap-2.5">
-                                <div className={`w-7 h-7 rounded-lg border text-[10px] font-bold flex items-center justify-center overflow-hidden shrink-0 ${part.avatarColor}`}>
-                                  {part.photoUrl ? (
-                                    <img src={part.photoUrl} alt={part.name} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
-                                  ) : (
-                                    part.name.split(' ').map(n=>n[0]).join('').slice(0, 2)
-                                  )}
+                        {(() => {
+                          const list = sortedActiveParticipants.filter(part => {
+                            if (!adminActiveSearchQuery.trim()) return true;
+                            const q = adminActiveSearchQuery.toLowerCase();
+                            return part.name.toLowerCase().includes(q) || 
+                              (part.idNo && part.idNo.toLowerCase().includes(q)) ||
+                              part.contact.toLowerCase().includes(q);
+                          });
+
+                          if (list.length === 0) {
+                            return (
+                              <tr>
+                                <td colSpan={4} className="p-10 text-center text-slate-400 italic font-sans bg-white">
+                                  No active roster students match "{adminActiveSearchQuery}"
+                                </td>
+                              </tr>
+                            );
+                          }
+
+                          return list.map((part, partIdx) => (
+                            <tr key={`${part.id}-${partIdx}`} className="hover:bg-slate-50/60 transition-colors">
+                              <td className="p-3 pl-5">
+                                <div className="flex items-center gap-2.5">
+                                  <div className={`w-7 h-7 rounded-lg border text-[10px] font-bold flex items-center justify-center overflow-hidden shrink-0 ${part.avatarColor}`}>
+                                    {part.photoUrl ? (
+                                      <img src={part.photoUrl} alt={part.name} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
+                                    ) : (
+                                      part.name.split(' ').map(n=>n[0]).join('').slice(0, 2)
+                                    )}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="font-semibold text-slate-900 block truncate max-w-[120px]" title={part.name}>{part.name}</span>
+                                    <span className="text-[10px] text-slate-400 block">{part.contact}</span>
+                                  </div>
                                 </div>
-                                <div className="min-w-0">
-                                  <span className="font-semibold text-slate-900 block truncate max-w-[120px]" title={part.name}>{part.name}</span>
-                                  <span className="text-[10px] text-slate-400 block">{part.contact}</span>
+                              </td>
+                              <td className="p-3 border-l border-slate-100">
+                                <span className="font-mono bg-slate-100 text-slate-700 px-1 py-0.2 rounded font-semibold text-[10px]">{part.idNo || 'None'}</span>
+                                <span className="text-[10px] text-slate-500 block mt-0.5 truncate max-w-[110px]">{part.cohort}</span>
+                              </td>
+                              <td className="p-3 text-slate-600 truncate max-w-[110px] border-l border-slate-100" title={part.caregiver || '-'}>
+                                {part.caregiver || '-'}
+                              </td>
+                              <td className="p-3 text-right pr-5 border-l border-slate-100">
+                                <div className="inline-flex gap-1.5">
+                                  <button
+                                    onClick={() => setSelectedParticipantId(part.id)}
+                                    className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg cursor-pointer transition-colors"
+                                    title="View Full Profile Details"
+                                  >
+                                    <Info className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteParticipant(part.id, false)}
+                                    disabled={!isAdminMode}
+                                    className={`p-1.5 rounded-lg transition-colors ${
+                                      isAdminMode
+                                        ? "text-rose-500 hover:text-rose-700 hover:bg-rose-50 cursor-pointer"
+                                        : "text-slate-300 cursor-not-allowed opacity-40"
+                                    }`}
+                                    title={isAdminMode ? "Archive Student (Keep Records)" : "Locked - Enable Admin Mode to archive"}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
                                 </div>
-                              </div>
-                            </td>
-                            <td className="p-3 border-l border-slate-100">
-                              <span className="font-mono bg-slate-100 text-slate-700 px-1 py-0.2 rounded font-semibold text-[10px]">{part.idNo || 'None'}</span>
-                              <span className="text-[10px] text-slate-500 block mt-0.5 truncate max-w-[110px]">{part.cohort}</span>
-                            </td>
-                            <td className="p-3 text-slate-600 truncate max-w-[110px] border-l border-slate-100" title={part.caregiver || '-'}>
-                              {part.caregiver || '-'}
-                            </td>
-                            <td className="p-3 text-right pr-5 border-l border-slate-100">
-                              <div className="inline-flex gap-1.5">
-                                <button
-                                  onClick={() => setSelectedParticipantId(part.id)}
-                                  className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg cursor-pointer transition-colors"
-                                  title="View Full Profile Details"
-                                >
-                                  <Info className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteParticipant(part.id, false)}
-                                  disabled={!isAdminMode}
-                                  className={`p-1.5 rounded-lg transition-colors ${
-                                    isAdminMode
-                                      ? "text-rose-500 hover:text-rose-700 hover:bg-rose-50 cursor-pointer"
-                                      : "text-slate-300 cursor-not-allowed opacity-40"
-                                  }`}
-                                  title={isAdminMode ? "Archive Student (Keep Records)" : "Locked - Enable Admin Mode to archive"}
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                              </td>
+                            </tr>
+                          ));
+                        })()}
                       </tbody>
                     </table>
                   )}
@@ -8539,6 +11686,28 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Search Former Registry */}
+                <div className="p-3 bg-slate-50/50 border-b border-slate-150 flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Search archives by name or ID..."
+                      value={adminFormerSearchQuery}
+                      onChange={(e) => setAdminFormerSearchQuery(e.target.value)}
+                      className="w-full pl-8 pr-12 py-1.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 placeholder:text-slate-450 focus:outline-none focus:border-slate-400 font-sans"
+                    />
+                    {adminFormerSearchQuery && (
+                      <button 
+                        onClick={() => setAdminFormerSearchQuery('')} 
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] bg-slate-150 hover:bg-slate-200 text-slate-600 rounded px-1.5 py-0.5 tracking-tight font-medium"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
                 <div className="divide-y divide-slate-100 flex-1 overflow-y-auto max-h-[380px] min-h-[220px]">
                   {formerParticipants.length === 0 ? (
                     <div className="p-10 text-center h-full flex flex-col items-center justify-center">
@@ -8546,45 +11715,63 @@ export default function App() {
                       <p className="text-xs text-slate-400 italic">Archive directory is empty. Try archiving an active student above to see them preserved here.</p>
                     </div>
                   ) : (
-                    formerParticipants.map(part => (
-                      <div key={part.id} className="p-4 hover:bg-slate-50/60 transition-all flex items-center justify-between gap-3 text-xs">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="font-semibold text-slate-900 truncate" title={part.name}>{part.name}</span>
-                            <span className="text-[9px] text-pink-700 font-sans bg-pink-50 px-1 rounded">{part.gender || 'Unknown'}</span>
-                          </div>
-                          <div className="text-[10px] text-slate-500 font-mono mt-0.5">
-                            ID: {part.idNo || '-'} • Archived: {part.formerDate || 'No Date'}
-                          </div>
-                          <div className="text-[10px] text-indigo-650 mt-1">
-                            Cohort: {part.cohort}
-                          </div>
-                        </div>
+                    (() => {
+                      const list = formerParticipants.filter(part => {
+                        if (!adminFormerSearchQuery.trim()) return true;
+                        const q = adminFormerSearchQuery.toLowerCase();
+                        return part.name.toLowerCase().includes(q) || 
+                          (part.idNo && part.idNo.toLowerCase().includes(q)) ||
+                          part.contact.toLowerCase().includes(q);
+                      });
 
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <button
-                            onClick={() => handleRestoreParticipant(part.id)}
-                            className="px-2.5 py-1.5 text-[10px] font-bold bg-slate-100 text-slate-800 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
-                            title="Restore student back to active tracker"
-                          >
-                            <Undo className="w-3 h-3 text-slate-600" />
-                            Restore
-                          </button>
-                          <button
-                            onClick={() => handleDeleteParticipant(part.id, true)}
-                            disabled={!isAdminMode}
-                            className={`p-1.5 rounded-lg transition-colors ${
-                              isAdminMode
-                                ? "text-rose-500 hover:bg-rose-50 cursor-pointer"
-                                : "text-slate-350 cursor-not-allowed opacity-40"
-                            }`}
-                            title={isAdminMode ? "PERMANENTLY erase from system records" : "Locked - Enable Admin Mode to delete"}
-                          >
-                            <Trash2 className={`w-3.5 h-3.5 ${isAdminMode ? "text-rose-500" : "text-slate-400"}`} />
-                          </button>
+                      if (list.length === 0) {
+                        return (
+                          <div className="p-8 text-center text-slate-400 italic font-sans text-xs">
+                            No archived directory records match "{adminFormerSearchQuery}"
+                          </div>
+                        );
+                      }
+
+                      return list.map((part, partIdx) => (
+                        <div key={`${part.id}-${partIdx}`} className="p-4 hover:bg-slate-50/60 transition-all flex items-center justify-between gap-3 text-xs">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold text-slate-900 truncate" title={part.name}>{part.name}</span>
+                              <span className="text-[9px] text-pink-700 font-sans bg-pink-50 px-1 rounded">{part.gender || 'Unknown'}</span>
+                            </div>
+                            <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                              ID: {part.idNo || '-'} • Archived: {part.formerDate || 'No Date'}
+                            </div>
+                            <div className="text-[10px] text-indigo-650 mt-1">
+                              Cohort: {part.cohort}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              onClick={() => handleRestoreParticipant(part.id)}
+                              className="px-2.5 py-1.5 text-[10px] font-bold bg-slate-100 text-slate-800 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                              title="Restore student back to active tracker"
+                            >
+                              <Undo className="w-3 h-3 text-slate-600" />
+                              Restore
+                            </button>
+                            <button
+                              onClick={() => handleDeleteParticipant(part.id, true)}
+                              disabled={!isAdminMode}
+                              className={`p-1.5 rounded-lg transition-colors ${
+                                isAdminMode
+                                  ? "text-rose-500 hover:bg-rose-50 cursor-pointer"
+                                  : "text-slate-350 cursor-not-allowed opacity-40"
+                              }`}
+                              title={isAdminMode ? "PERMANENTLY erase from system records" : "Locked - Enable Admin Mode to delete"}
+                            >
+                              <Trash2 className={`w-3.5 h-3.5 ${isAdminMode ? "text-rose-500" : "text-slate-400"}`} />
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))
+                      ));
+                    })()
                   )}
                 </div>
                 
@@ -8602,6 +11789,175 @@ export default function App() {
               </div>
 
             </div>
+
+            {/* AUDIT TRAIL LOGS & TRANSACTION JOURNALS AREA */}
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mt-6">
+              
+              {/* Left Column: TRANSACTION JOURNAL */}
+              <div className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-2xs flex flex-col">
+                <div className="p-5 border-b border-slate-150 bg-slate-50/50 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="p-1.5 bg-emerald-50 rounded-lg text-emerald-700">
+                      <BookOpen className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">System Transaction Journal</h3>
+                      <p className="text-xs text-slate-500 mt-0.5">Real-time tracker records & save events</p>
+                    </div>
+                  </div>
+                  <span className="text-xs bg-emerald-100 text-emerald-800 font-extrabold px-2 py-0.5 rounded-full">
+                    {systemLogs.filter(l => l.category === 'transaction').length} active
+                  </span>
+                </div>
+
+                <div className="p-4 bg-slate-50/80 border-b border-slate-150 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <span className="text-slate-500 font-medium font-sans">Automatic operation registry & database adjustments</span>
+                  <button
+                    onClick={() => {
+                      const csvContent = "data:text/csv;charset=utf-8," 
+                        + ["Timestamp,Action,Details,Operator"].join(",") + "\n"
+                        + systemLogs.filter(l => l.category === 'transaction').map(l => `"${l.timestamp}","${l.action.replace(/"/g, '""')}","${l.details.replace(/"/g, '""')}","${l.operator.replace(/"/g, '""')}"`).join("\n");
+                      const encodedUri = encodeURI(csvContent);
+                      const link = document.createElement("a");
+                      link.setAttribute("href", encodedUri);
+                      link.setAttribute("download", "Lomuriangole_CYDC_Transactions.csv");
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                    }}
+                    className="text-[11px] font-bold text-indigo-700 hover:text-indigo-850 flex items-center gap-1 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" /> Export Journal
+                  </button>
+                </div>
+
+                <div className="divide-y divide-slate-100 flex-1 overflow-y-auto max-h-[380px] min-h-[300px]">
+                  {systemLogs.filter(l => l.category === 'transaction').length === 0 ? (
+                    <div className="p-10 text-center h-full flex flex-col items-center justify-center text-slate-400 italic">
+                      No transactions recorded in this session.
+                    </div>
+                  ) : (
+                    systemLogs.filter(l => l.category === 'transaction').map((log, idx) => (
+                      <div key={`${log.id}-${idx}`} className="p-4 hover:bg-slate-50/50 transition-all flex flex-col gap-1.5 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-slate-800">{log.action}</span>
+                          <span className="text-[10px] text-slate-400 font-mono flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-slate-350" /> {log.timestamp.replace('T', ' ').slice(0, 19)}
+                          </span>
+                        </div>
+                        <p className="text-slate-600 leading-normal font-sans pr-2">{log.details}</p>
+                        <div className="flex justify-between items-center text-[10px] text-slate-400 font-mono mt-0.5">
+                          <span>Operator: <b className="text-indigo-650">{log.operator}</b></span>
+                          <span className="bg-slate-100 text-slate-500 px-1.5 py-0.2 rounded font-sans uppercase font-bold tracking-wider scale-90">ID: {log.id.slice(4,10)}</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Right Column: SECURITY AUDIT TRAIL */}
+              <div className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-2xs flex flex-col">
+                <div className="p-5 border-b border-slate-150 bg-slate-50/50 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="p-1.5 bg-rose-50 rounded-lg text-rose-700">
+                      <Lock className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">Security Audit Trail</h3>
+                      <p className="text-xs text-slate-500 mt-0.5">Privileged actions & security exceptions</p>
+                    </div>
+                  </div>
+                  <span className="text-xs bg-rose-100 text-rose-800 font-extrabold px-2 py-0.5 rounded-full">
+                    {systemLogs.filter(l => l.category === 'audit').length} active
+                  </span>
+                </div>
+
+                <div className="p-4 bg-slate-50/80 border-b border-slate-150 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <span className="text-slate-500 font-medium font-sans">Immutable verification log & deletion audits</span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        const csvContent = "data:text/csv;charset=utf-8," 
+                          + ["Timestamp,SecurityAction,Details,Operator"].join(",") + "\n"
+                          + systemLogs.filter(l => l.category === 'audit').map(l => `"${l.timestamp}","${l.action.replace(/"/g, '""')}","${l.details.replace(/"/g, '""')}","${l.operator.replace(/"/g, '""')}"`).join("\n");
+                        const encodedUri = encodeURI(csvContent);
+                        const link = document.createElement("a");
+                        link.setAttribute("href", encodedUri);
+                        link.setAttribute("download", "Lomuriangole_CYDC_AuditTrail.csv");
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                      }}
+                      className="text-[11px] font-bold text-indigo-700 hover:text-indigo-850 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" /> Export Trail
+                    </button>
+                    {systemLogs.length > 2 && (
+                      <button
+                        onClick={() => {
+                          if (!isAdminMode) {
+                            alert("Only privileged Administrators can clear log databases.");
+                            return;
+                          }
+                          if (window.confirm("Purge all logs from this browser's database and keep only the standard initialization traces?")) {
+                            localStorage.removeItem('attendance_tracker_system_logs');
+                            setSystemLogs([
+                              {
+                                id: 'log_init_0',
+                                timestamp: new Date().toISOString(),
+                                category: 'audit',
+                                action: 'System Logs Cleared',
+                                details: 'Lomuriangole CYDC database logs cleared manually by Unlocked Administrator.',
+                                operator: 'Unlocked Administrator'
+                              }
+                            ]);
+                          }
+                        }}
+                        disabled={!isAdminMode}
+                        className={`text-[11px] font-bold flex items-center gap-1 ${
+                          isAdminMode 
+                            ? "text-rose-600 hover:text-rose-800 cursor-pointer" 
+                            : "text-slate-300 cursor-not-allowed opacity-40"
+                        }`}
+                        title={isAdminMode ? "Purge log database" : "Locked - Please unlock Admin Mode to purge logs"}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" /> Purge Logs
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="divide-y divide-slate-100 flex-1 overflow-y-auto max-h-[380px] min-h-[300px]">
+                  {systemLogs.filter(l => l.category === 'audit').length === 0 ? (
+                    <div className="p-10 text-center h-full flex flex-col items-center justify-center text-slate-400 italic">
+                      No security audit events logged yet.
+                    </div>
+                  ) : (
+                    systemLogs.filter(l => l.category === 'audit').map((log, idx) => (
+                      <div key={`${log.id}-${idx}`} className="p-4 hover:bg-rose-50/20 transition-all flex flex-col gap-1.5 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-rose-950 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                            {log.action}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-mono flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-slate-350" /> {log.timestamp.replace('T', ' ').slice(0, 19)}
+                          </span>
+                        </div>
+                        <p className="text-slate-650 leading-normal font-sans pr-2">{log.details}</p>
+                        <div className="flex justify-between items-center text-[10px] text-slate-400 font-mono mt-0.5">
+                          <span>Operator: <b className="text-rose-800">{log.operator}</b></span>
+                          <span className="bg-rose-50 text-rose-600 px-1.5 py-0.2 rounded font-sans uppercase font-bold tracking-wider scale-90 border border-rose-100">AUDIT</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+            </div>
+
           </div>
         )}
       </main>
@@ -8956,11 +12312,11 @@ export default function App() {
                       </div>
                     ) : (
                       <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                        {inspectedParticipant.scannedForms.map((form) => {
+                        {inspectedParticipant.scannedForms.map((form, fIdx) => {
                           const isSelected = selectedScanDocId === form.id;
                           const fTypeNice = form.formType.replace('_', ' ').toUpperCase();
                           return (
-                            <div key={form.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-3xs transition-all">
+                            <div key={`${form.id}-${fIdx}`} className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-3xs transition-all">
                               {/* Accordion Trigger Header */}
                               <div
                                 onClick={() => setSelectedScanDocId(isSelected ? null : form.id)}
@@ -8987,14 +12343,19 @@ export default function App() {
                                 <div className="flex items-center gap-2 shrink-0">
                                   <button
                                     type="button"
+                                    disabled={!isAdminMode}
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       handleDeleteScannedForm(inspectedParticipant.id, form.id);
                                     }}
-                                    className="p-1 text-slate-400 hover:text-rose-650 hover:bg-rose-50 rounded transition-colors"
-                                    title="Delete record from dossier"
+                                    className={`p-1 rounded transition-colors ${
+                                      isAdminMode 
+                                        ? "text-slate-400 hover:text-rose-650 hover:bg-rose-50 cursor-pointer" 
+                                        : "text-slate-200 cursor-not-allowed opacity-50"
+                                    }`}
+                                    title={isAdminMode ? "Delete record from dossier" : "Locked - Please unlock Admin Mode to delete"}
                                   >
-                                    <Trash2 className="w-3.5 h-3.5" />
+                                    {isAdminMode ? <Trash2 className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5 text-slate-300" />}
                                   </button>
                                   <span className="text-slate-400 text-[10px] font-bold font-mono">
                                     {isSelected ? '▲' : '▼'}
@@ -9214,22 +12575,54 @@ export default function App() {
                         💡 <b>Staff Action Step:</b> {aiSingleReports[inspectedParticipant.id].recommendation}
                       </div>
 
-                      <div className="flex items-center justify-between pt-2 border-t border-slate-100">
-                        <button
-                          type="button"
-                          disabled={aiReportLoading}
-                          onClick={() => generateIndividualAIReport(inspectedParticipant, inspectedStats)}
-                          className="text-[10px] font-bold text-indigo-705 hover:text-indigo-850 hover:underline cursor-pointer disabled:opacity-50"
-                        >
-                          🔄 Regenerate analysis insights
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => clearSingleAIReport(inspectedParticipant.id)}
-                          className="text-[10px] font-bold text-rose-600 hover:text-rose-700 hover:underline cursor-pointer"
-                        >
-                          Remove from cache
-                        </button>
+                      <button
+                        type="button"
+                        id="download-official-report-pdf"
+                        onClick={() => downloadIndividualAIReportPDF(inspectedParticipant, inspectedStats)}
+                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-[12px] py-2.5 px-4 rounded-xl flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-xs hover:shadow-md active:scale-98"
+                      >
+                        <Download className="w-4 h-4 text-emerald-200" />
+                        <span>Download Official Evaluation Report</span>
+                      </button>
+
+                      <div className="pt-2 border-t border-slate-100 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1">
+                            <label className="text-[9px] font-bold text-slate-500 uppercase">Start Date</label>
+                            <input
+                              type="date"
+                              value={aiReportStartDate}
+                              onChange={(e) => setAiReportStartDate(e.target.value)}
+                              className="w-full bg-white border border-slate-200 rounded p-1 text-[10px] focus:outline-none"
+                            />
+                          </div>
+                          <div className="flex-1">
+                            <label className="text-[9px] font-bold text-slate-500 uppercase">End Date</label>
+                            <input
+                              type="date"
+                              value={aiReportEndDate}
+                              onChange={(e) => setAiReportEndDate(e.target.value)}
+                              className="w-full bg-white border border-slate-200 rounded p-1 text-[10px] focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <button
+                            type="button"
+                            disabled={aiReportLoading}
+                            onClick={() => generateIndividualAIReport(inspectedParticipant, inspectedStats)}
+                            className="text-[10px] font-bold text-indigo-705 hover:text-indigo-850 hover:underline cursor-pointer disabled:opacity-50"
+                          >
+                            🔄 Regenerate analysis insights
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => clearSingleAIReport(inspectedParticipant.id)}
+                            className="text-[10px] font-bold text-rose-600 hover:text-rose-700 hover:underline cursor-pointer"
+                          >
+                            Remove from cache
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ) : aiReportLoading ? (
@@ -9245,6 +12638,29 @@ export default function App() {
                       <p className="text-[11px] text-slate-450 leading-normal">
                         Generate private, deep-reasoning academic progress & welfare analytical evaluation reports powered by Gemini AI for student {inspectedParticipant.name}.
                       </p>
+                      
+                      {/* AI REPORT FILTERS FOR INDIVIDUAL */}
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="flex-1">
+                          <label className="text-[9px] font-bold text-slate-500 uppercase">Start Date</label>
+                          <input
+                            type="date"
+                            value={aiReportStartDate}
+                            onChange={(e) => setAiReportStartDate(e.target.value)}
+                            className="w-full bg-white border border-slate-200 rounded p-1.5 text-[10px] focus:outline-none"
+                          />
+                        </div>
+                        <div className="flex-1">
+                          <label className="text-[9px] font-bold text-slate-500 uppercase">End Date</label>
+                          <input
+                            type="date"
+                            value={aiReportEndDate}
+                            onChange={(e) => setAiReportEndDate(e.target.value)}
+                            className="w-full bg-white border border-slate-200 rounded p-1.5 text-[10px] focus:outline-none"
+                          />
+                        </div>
+                      </div>
+
                       <button
                         type="button"
                         onClick={() => generateIndividualAIReport(inspectedParticipant, inspectedStats)}
@@ -9751,7 +13167,7 @@ export default function App() {
                   </h4>
                   
                   <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 overflow-hidden">
-                    {sessions.map(s => {
+                    {sessions.map((s, sIdx) => {
                       const stat = (attendance[inspectedParticipant.id] && attendance[inspectedParticipant.id][s.date]) || 'unmarked';
                       
                       let badge = <span className="bg-slate-100 text-slate-400 font-mono text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase">Unmarked</span>;
@@ -9760,7 +13176,7 @@ export default function App() {
                       if (stat === 'excused') badge = <span className="bg-slate-100 border border-slate-200 text-slate-500 font-mono text-[10px] px-2 py-0.5 rounded-md font-semibold uppercase">Excused</span>;
 
                       return (
-                        <div key={s.date} className="flex items-center justify-between p-3 hover:bg-slate-50/50">
+                        <div key={`${s.date}-${sIdx}`} className="flex items-center justify-between p-3 hover:bg-slate-50/50">
                           <div>
                             <span className="font-semibold text-slate-800 text-xs">{formatToReadableDate(s.date)}</span>
                             <span className="text-slate-400 text-[10px] font-mono block mt-0.5">{s.label || 'Session'}</span>
@@ -9770,8 +13186,13 @@ export default function App() {
                             {/* Inline Switch Options */}
                             <select
                               value={stat}
+                              disabled={!isAdminMode}
                               onChange={(e) => setSpecificAttendance(inspectedParticipant.id, s.date, e.target.value as AttendanceStatus)}
-                              className="bg-white border border-slate-200 rounded-lg text-[10px] p-1 font-medium text-slate-700 cursor-pointer focus:outline-none"
+                              className={`bg-white border border-slate-200 rounded-lg text-[10px] p-1 font-medium focus:outline-none ${
+                                isAdminMode 
+                                  ? "text-slate-700 cursor-pointer" 
+                                  : "text-slate-400 cursor-not-allowed bg-slate-50 pointer-events-none"
+                              }`}
                             >
                               <option value="present">Present</option>
                               <option value="absent">Absent</option>
@@ -9799,8 +13220,8 @@ export default function App() {
                     {inspectedParticipant.documents && inspectedParticipant.documents.length > 0 ? (
                       <div className="space-y-2 mb-4">
                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block font-mono">Stored Files</span>
-                        {inspectedParticipant.documents.map((doc) => (
-                          <div key={doc.id} className="flex flex-col sm:flex-row sm:items-center justify-between p-2 rounded-lg bg-slate-50 border border-slate-100 gap-2">
+                        {inspectedParticipant.documents.map((doc, docIdx) => (
+                          <div key={`${doc.id}-${docIdx}`} className="flex flex-col sm:flex-row sm:items-center justify-between p-2 rounded-lg bg-slate-50 border border-slate-100 gap-2">
                             <div className="overflow-hidden">
                               <span className="text-xs font-semibold text-slate-700 block truncate">{doc.name}</span>
                               <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">{formatToReadableDate(doc.uploadDate)}</span>
@@ -9816,10 +13237,16 @@ export default function App() {
                               </a>
                               <button
                                 type="button"
+                                disabled={!isAdminMode}
                                 onClick={() => handleDeleteDocument(inspectedParticipant.id, doc.id)}
-                                className="bg-rose-50 hover:bg-rose-100 text-rose-600 px-2 py-1 rounded text-[10px] font-bold transition-colors"
+                                className={`px-2 py-1 rounded text-[10px] font-bold transition-colors ${
+                                  isAdminMode 
+                                    ? "bg-rose-50 hover:bg-rose-100 text-rose-600 cursor-pointer" 
+                                    : "bg-slate-55 bg-slate-50 border border-slate-150 text-slate-350 cursor-not-allowed opacity-50 font-medium"
+                                }`}
+                                title={isAdminMode ? "Delete official document attachment" : "Locked - Please unlock Admin Mode to delete"}
                               >
-                                Delete
+                                {isAdminMode ? "Delete" : "Locked 🔒"}
                               </button>
                             </div>
                           </div>
@@ -9874,6 +13301,582 @@ export default function App() {
                       )}
                     </div>
                   </div>
+                </div>
+
+                {/* CUSTOM FORMS & ASSESSMENTS */}
+                <div className="space-y-3 pt-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+                      <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-widest font-mono">
+                        Forms & Assessments
+                      </h4>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsFormModalOpen(true)}
+                      className="text-[10px] bg-slate-900 hover:bg-slate-800 text-white font-bold px-2 py-1 rounded shadow-3xs transition-colors"
+                    >
+                      + Create New Form
+                    </button>
+                  </div>
+
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-3xs space-y-4">
+                    <p className="text-xs text-slate-500 leading-relaxed max-w-lg">
+                      Generate structured assessments forms (e.g. Home Visit, School Visit) for AI context processing.
+                    </p>
+                    
+                    {inspectedParticipant.filledForms && inspectedParticipant.filledForms.length > 0 ? (
+                      <div className="space-y-2">
+                        {inspectedParticipant.filledForms.map((form, fIdx) => {
+                          const isExpanded = expandedFormId === form.id;
+                          return (
+                            <div key={`${form.id}-${fIdx}`} className="border border-slate-200 rounded-xl bg-slate-50 overflow-hidden shadow-3xs transition-all text-left">
+                              <div 
+                                onClick={() => setExpandedFormId(isExpanded ? null : form.id)}
+                                className="p-3 bg-white hover:bg-slate-50 flex items-center justify-between gap-3 cursor-pointer select-none"
+                              >
+                                <div className="text-left">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <span className="text-[11px] font-extrabold text-indigo-900 font-mono uppercase tracking-wider">{form.type}</span>
+                                    <span className="text-[9px] bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded-md font-mono font-bold tracking-wider">
+                                      {formatToReadableDate(form.date)}
+                                    </span>
+                                  </div>
+                                  <p className="text-[10px] text-slate-500 font-medium line-clamp-1">
+                                    {form.data.primaryIntervention || form.data.purpose || form.data.observations || form.data.summary || "Structured questionnaire completed."}
+                                  </p>
+                                </div>
+                                <div className="flex items-center gap-3 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      generateFormPDF(form.type, form.data, false, inspectedParticipant.name);
+                                    }}
+                                    className="text-[10px] text-emerald-600 bg-emerald-50/50 hover:bg-emerald-50 px-2 py-1 rounded transition-colors border border-emerald-100 flex items-center gap-1 font-bold"
+                                    title="Download filled-out form as official printable PDF dossier"
+                                  >
+                                    <Download className="w-3 h-3" />
+                                    <span>Download PDF</span>
+                                  </button>
+                                  <span className="text-[10px] text-indigo-650 font-bold hover:underline">
+                                    {isExpanded ? "Collapse ▲" : "View Details ▼"}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    disabled={!isAdminMode}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteFilledForm(inspectedParticipant.id, form.id);
+                                    }}
+                                    className={`text-[10px] font-extrabold px-2 py-1 rounded transition-colors border flex items-center gap-1 ${
+                                      isAdminMode 
+                                        ? "text-rose-600 hover:bg-rose-50 border-rose-100 hover:border-rose-200 cursor-pointer" 
+                                        : "text-slate-350 bg-slate-50 border-slate-150 cursor-not-allowed opacity-60"
+                                    }`}
+                                    title={isAdminMode ? "Permanently delete this completed form" : "Lock - Please unlock Admin Mode to delete saved forms"}
+                                  >
+                                    {isAdminMode ? <Trash2 className="w-3 h-3 text-rose-500" /> : <Lock className="w-3 h-3 text-slate-400" />}
+                                    <span>Delete</span>
+                                  </button>
+                                </div>
+                              </div>
+
+                              {isExpanded && (
+                                <div className="p-4 border-t border-slate-150 bg-slate-50/50 text-left space-y-4 animate-fade-in text-[10.5px] leading-relaxed text-slate-705">
+                                  {/* Render Home Visit Questionnaire Details */}
+                                  {form.type === 'Home Visit' && (
+                                    <div className="space-y-4 text-slate-705">
+                                      
+                                      {/* Section 1: Basic Information */}
+                                      <div className="border border-slate-205 rounded-xl bg-white overflow-hidden shadow-2xs">
+                                        <div className="bg-rose-50 px-3.5 py-2 border-b border-rose-100 flex justify-between items-center">
+                                          <span className="font-bold text-rose-950 font-serif text-[11px] uppercase tracking-wider">1. Basic Information</span>
+                                          <span className="font-mono text-[9px] bg-white text-rose-600 border border-rose-200 px-2 py-0.5 rounded-full font-bold">
+                                            ID: {form.data.idNo || 'N/A'}
+                                          </span>
+                                        </div>
+                                        <div className="p-3 grid grid-cols-2 sm:grid-cols-3 gap-3 text-[10px]">
+                                          <div><span className="font-semibold text-slate-400 uppercase text-[8px] font-mono block">Assessor:</span> <span className="font-bold text-slate-800">{form.data.assessorName || 'N/A'}</span></div>
+                                          <div><span className="font-semibold text-slate-400 uppercase text-[8px] font-mono block">Position / Org:</span> <span className="font-medium text-slate-700">{form.data.assessorPosition || 'N/A'}</span></div>
+                                          <div><span className="font-semibold text-slate-400 uppercase text-[8px] font-mono block">Date of Assessment:</span> <span className="font-bold text-slate-800">{form.data.date || 'N/A'}</span></div>
+                                          <div><span className="font-semibold text-slate-400 uppercase text-[8px] font-mono block">Village/Community:</span> <span className="font-medium text-slate-700">{form.data.village || 'N/A'}</span></div>
+                                          <div><span className="font-semibold text-slate-400 uppercase text-[8px] font-mono block">Sub-county/District:</span> <span className="font-medium text-slate-700">{form.data.district || 'N/A'}</span></div>
+                                        </div>
+                                      </div>
+
+                                      {/* Section 2: Family Composition */}
+                                      <div className="border border-slate-205 rounded-xl bg-white overflow-hidden shadow-2xs">
+                                        <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-205">
+                                          <span className="font-bold text-slate-800 font-serif text-[11px] uppercase tracking-wider">2. Family Composition</span>
+                                        </div>
+                                        <div className="p-2.5 space-y-2">
+                                          {[0, 1, 2].some(idx => form.data[`fam_name_${idx}`]) ? (
+                                            <div className="divide-y divide-slate-100 text-[10.5px]">
+                                              {[0, 1, 2].map(idx => {
+                                                const hasData = form.data[`fam_name_${idx}`];
+                                                if (!hasData) return null;
+                                                return (
+                                                  <div key={idx} className="py-2 first:pt-0 last:pb-0 grid grid-cols-1 sm:grid-cols-4 gap-2">
+                                                    <div><span className="text-[9px] font-mono text-slate-400 uppercase block">Name</span> <span className="font-semibold text-slate-800">{form.data[`fam_name_${idx}`] || 'N/A'}</span></div>
+                                                    <div className="grid grid-cols-2 gap-1 text-[10px]">
+                                                      <div><span className="text-[9px] font-mono text-slate-400 uppercase block">Sex</span> <span className="text-slate-700">{form.data[`fam_sex_${idx}`] || 'N/A'}</span></div>
+                                                      <div><span className="text-[9px] font-mono text-slate-400 uppercase block">Age</span> <span className="text-slate-700">{form.data[`fam_age_${idx}`] || 'N/A'}</span></div>
+                                                    </div>
+                                                    <div><span className="text-[9px] font-mono text-slate-400 uppercase block">Relationship</span> <span className="text-indigo-900 font-medium">{form.data[`fam_rel_${idx}`] || 'N/A'}</span></div>
+                                                    <div><span className="text-[9px] font-mono text-slate-400 uppercase block">Occupation</span> <span className="text-slate-600 block truncate">{form.data[`fam_occ_${idx}`] || 'N/A'}</span></div>
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
+                                          ) : (
+                                            <p className="text-[10px] text-slate-400 italic p-1 text-center">No household family members listed in compositional record.</p>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {/* Section 3: The Four Aspects of Well-Being */}
+                                      <div className="space-y-3">
+                                        <h5 className="font-mono font-bold text-[9px] tracking-widest text-[#d97706] uppercase">3. Aspect-by-Aspect Assessment Results</h5>
+                                        
+                                        {/* Social Aspect */}
+                                        <div className="p-3 bg-indigo-50/20 border border-indigo-100 rounded-xl space-y-2">
+                                          <div className="flex justify-between items-center border-b border-indigo-100/50 pb-1.5">
+                                            <span className="font-bold text-indigo-950 uppercase text-[10px]">🟢 Aspect A: Social Well-being</span>
+                                            <span className="font-mono text-[9.5px] font-bold bg-indigo-100 text-indigo-805 px-2.5 py-0.5 rounded-full">
+                                              Score: {form.data.soc_rating ? `★ ${form.data.soc_rating}/5` : 'N/A'}
+                                            </span>
+                                          </div>
+                                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px]">
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Family Relations:</span> <span className="font-semibold text-slate-800">{form.data.soc_relationships || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Decision Maker:</span> <span className="font-semibold text-slate-800">{form.data.soc_decisionMaking || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Child Care & Protection:</span> <span className="font-semibold text-slate-800">{form.data.soc_childrenCare || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Social Support Network:</span> <span className="font-semibold text-slate-800">{form.data.soc_socialSupport || 'N/A'}</span></div>
+                                          </div>
+                                          {form.data.social_abuse_reported === 'Yes' && (
+                                            <div className="mt-1.5 p-2 bg-rose-50 border border-rose-100 rounded text-[9.5px] leading-relaxed text-rose-900 font-mono block">
+                                              ⚠ <strong>ABUSE REPORTED:</strong> {form.data.social_abuse_explanation || 'No explanation specified.'}
+                                            </div>
+                                          )}
+                                        </div>
+
+                                        {/* Economic Aspect */}
+                                        <div className="p-3 bg-rose-50/20 border border-rose-100 rounded-xl space-y-2">
+                                          <div className="flex justify-between items-center border-b border-rose-100/50 pb-1.5">
+                                            <span className="font-bold text-rose-955 uppercase text-[10px]">🟢 Aspect B: Economic Well-being</span>
+                                            <span className="font-mono text-[9.5px] font-bold bg-rose-100 text-rose-805 px-2.5 py-0.5 rounded-full">
+                                              Score: {form.data.econ_rating ? `★ ${form.data.econ_rating}/5` : 'N/A'}
+                                            </span>
+                                          </div>
+                                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px]">
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Livelihood Income:</span> <span className="font-semibold text-slate-800">{form.data.econ_incomeSource || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Employment:</span> <span className="font-semibold text-slate-800">{form.data.econ_employmentStatus || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Monthly Income Est:</span> <span className="font-semibold text-slate-800">{form.data.econ_monthlyIncome || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Food Security Level:</span> <span className="font-semibold text-rose-950 font-medium">{form.data.econ_foodSecurity || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Livelihood Assets:</span> <span className="font-medium text-slate-700">{form.data.econ_assets || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Economic Challenges:</span> <span className="font-medium text-slate-700">{form.data.econ_challenges || 'N/A'}</span></div>
+                                          </div>
+                                        </div>
+
+                                        {/* Health Aspect */}
+                                        <div className="p-3 bg-emerald-50/20 border border-emerald-110 rounded-xl space-y-2">
+                                          <div className="flex justify-between items-center border-b border-emerald-100/50 pb-1.5">
+                                            <span className="font-bold text-emerald-950 uppercase text-[10px]">🟢 Aspect C: Health & Sanitation</span>
+                                            <span className="font-mono text-[9.5px] font-bold bg-emerald-100 text-emerald-805 px-2.5 py-0.5 rounded-full">
+                                              Score: {form.data.health_rating ? `★ ${form.data.health_rating}/5` : 'N/A'}
+                                            </span>
+                                          </div>
+                                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px]">
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Health Facility Access:</span> <span className="font-semibold text-slate-800">{form.data.health_access || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Facility Distance:</span> <span className="font-semibold text-slate-800">{form.data.health_distance || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Immunized Fully:</span> <span className="font-semibold text-slate-800">{form.data.health_immunization || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Pit Latrine / Cleanliness:</span> <span className="font-semibold text-slate-800">{form.data.health_sanitation || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Water Source:</span> <span className="font-medium text-slate-700">{form.data.health_waterSource || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Common Illnesses:</span> <span className="font-medium text-slate-700">{form.data.health_illnesses || 'N/A'}</span></div>
+                                          </div>
+                                          {form.data.health_concerns && (
+                                            <p className="p-1 px-2 border-l-2 border-emerald-400 text-emerald-950 italic text-[9.5px] bg-emerald-50/50 rounded-r">
+                                              💡 <strong>Health Concerns:</strong> "{form.data.health_concerns}"
+                                            </p>
+                                          )}
+                                        </div>
+
+                                        {/* Education Aspect */}
+                                        <div className="p-3 bg-teal-50/20 border border-teal-110 rounded-xl space-y-2">
+                                          <div className="flex justify-between items-center border-b border-teal-100/50 pb-1.5">
+                                            <span className="font-bold text-teal-950 uppercase text-[10px]">🟢 Aspect D: Education Well-being</span>
+                                            <span className="font-mono text-[9.5px] font-bold bg-teal-100 text-teal-805 px-2.5 py-0.5 rounded-full">
+                                              Score: {form.data.edu_rating ? `★ ${form.data.edu_rating}/5` : 'N/A'}
+                                            </span>
+                                          </div>
+                                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px]">
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Attendance Level:</span> <span className="font-semibold text-slate-800">{form.data.edu_attendance || 'N/A'}</span></div>
+                                            <div><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Home Study Area:</span> <span className="font-semibold text-slate-800">{form.data.edu_environment || 'N/A'}</span></div>
+                                            <div className="sm:col-span-2"><span className="text-slate-400 font-mono text-[8.5px] uppercase block">Aesthetic Involvement:</span> <span className="font-semibold text-slate-800">{form.data.edu_involvement || 'N/A'}</span></div>
+                                            
+                                            <div className="sm:col-span-2">
+                                              <span className="text-slate-400 font-mono text-[8.5px] uppercase block">Educational Barriers Detected:</span>
+                                              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                                {['Fees', 'Child_labour', 'Distance', 'Early_marriage'].map(b => {
+                                                  const active = form.data[`edu_barrier_${b}`];
+                                                  if (!active) return null;
+                                                  return <span key={b} className="bg-teal-50 border border-teal-200 text-teal-800 text-[8px] font-bold tracking-wide px-2 py-0.5 rounded-full font-mono">{b.replace('_', ' ').toUpperCase()}</span>;
+                                                })}
+                                                {form.data.edu_barrier_other && <span className="bg-slate-100 border text-slate-700 text-[8.5px] italic px-2 py-0.5 rounded font-serif">Other: {form.data.edu_barrier_other}</span>}
+                                              </div>
+                                            </div>
+                                          </div>
+                                          {form.data.edu_comments && (
+                                            <p className="p-1 px-2 border-l-2 border-teal-400 text-teal-950 italic text-[9.5px] bg-teal-50/50 rounded-r">
+                                              💡 <strong>Assessment Remarks:</strong> "{form.data.edu_comments}"
+                                            </p>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {/* Section 4: General Family Well-Being */}
+                                      <div className="border border-amber-205 rounded-xl bg-white overflow-hidden shadow-2xs">
+                                        <div className="bg-amber-50/50 px-3.5 py-2 border-b border-amber-100 flex justify-between items-center">
+                                          <span className="font-bold text-slate-900 font-serif text-[11px] uppercase tracking-wider">4. General Wellbeing Summary</span>
+                                          <span className="font-mono text-[9px] bg-amber-105 text-amber-950 font-extrabold border border-amber-200 px-2 py-0.5 rounded-full uppercase">
+                                            Status: {form.data.general_condition || 'N/A'}
+                                          </span>
+                                        </div>
+                                        <div className="p-3 space-y-2 text-[10px]">
+                                          <div>
+                                            <span className="font-semibold text-slate-450 block uppercase text-[8px]">Urgent Intervention Needs:</span>
+                                            <div className="flex flex-wrap gap-1.5 mt-1">
+                                              {[
+                                                { label: 'Food support', key: 'need_Food' },
+                                                { label: 'Medical support', key: 'need_Medical' },
+                                                { label: 'School support', key: 'need_School' },
+                                                { label: 'Shelter improvement', key: 'need_Shelter' },
+                                                { label: 'Protection intervention', key: 'need_Protection' },
+                                                { label: 'Livelihood support', key: 'need_Livelihood' }
+                                              ].map((item) => {
+                                                const checked = form.data[item.key];
+                                                if (!checked) return null;
+                                                return <span key={item.key} className="bg-rose-50 border border-rose-200 text-rose-700 text-[8.5px] font-bold px-2 py-0.5 rounded-md font-mono">{item.label.toUpperCase()}</span>;
+                                              })}
+                                            </div>
+                                          </div>
+                                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1">
+                                            <div><span className="font-semibold text-slate-450 block uppercase text-[8px]">Key Strengths:</span> <div className="text-slate-800 italic leading-relaxed">"{form.data.general_strengths || 'N/A'}"</div></div>
+                                            <div><span className="font-semibold text-slate-450 block uppercase text-[8px]">Vulnerabilities & stress factors:</span> <div className="text-slate-800 italic leading-relaxed">"{form.data.general_vulnerabilities || 'N/A'}"</div></div>
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {/* Section 5: Action Plan & Recommendations */}
+                                      <div className="border border-indigo-205 rounded-xl bg-indigo-50/10 p-3 space-y-2 text-[10px]">
+                                        <h5 className="font-bold text-indigo-950 uppercase text-[10.5px]">📋 5. Recommendation Action Plan</h5>
+                                        <div className="space-y-1.5 leading-relaxed text-slate-800">
+                                          <div><strong>Immediate Actions Required:</strong> <p className="text-indigo-900 bg-white/70 p-2 rounded border border-indigo-100 font-sans">{form.data.plan_immediate || 'N/A'}</p></div>
+                                          <div><strong>Long-term Support Plan:</strong> <p className="bg-white/70 p-2 rounded border border-indigo-100">{form.data.plan_longTerm || 'N/A'}</p></div>
+                                          <div><strong>External Referrals Made:</strong> <p className="bg-white/70 p-2 rounded border border-indigo-100 font-mono text-[9px]">{form.data.plan_referrals || 'None'}</p></div>
+                                        </div>
+                                      </div>
+
+                                      {/* Section 6 & 7: Follow-up & Declaration */}
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-[10px]">
+                                        <div className="p-3 bg-slate-50 border rounded-xl">
+                                          <span className="font-bold text-slate-800 block uppercase text-[8.5px] font-mono border-b pb-1 mb-1.5">📅 6. Follow-up Tracking</span>
+                                          <div><strong>Next Visit Date:</strong> {form.data.followUp_nextDate || 'N/A'}</div>
+                                          <div><strong>Responsible Officer:</strong> {form.data.followUp_officer || 'N/A'}</div>
+                                        </div>
+                                        <div className="p-3 bg-slate-50 border rounded-xl">
+                                          <span className="font-bold text-slate-800 block uppercase text-[8.5px] font-mono border-b pb-1 mb-1.5">🖋 7. Declaration signatures</span>
+                                          <div><strong>Assessor Action Signature:</strong> {form.data.declaration_assessor || 'N/A'}</div>
+                                          <div><strong>Representative thumbs/sig:</strong> {form.data.declaration_representative || 'N/A'}</div>
+                                        </div>
+                                      </div>
+
+                                    </div>
+                                  )}
+
+                                  {/* Render School Visit Questionnaire Details */}
+                                  {form.type === 'School Visit' && (
+                                    <div className="space-y-3">
+                                      <div className="grid grid-cols-2 gap-3 pb-3 border-b border-slate-200">
+                                        <div><span className="font-bold text-slate-450 block uppercase text-[8.5px] font-mono">Visiting Staff:</span> {form.data.staffName || 'N/A'}</div>
+                                        <div><span className="font-bold text-slate-450 block uppercase text-[8.5px] font-mono">FCP Church Partner:</span> {form.data.fcpName || 'N/A'}</div>
+                                        <div><span className="font-bold text-slate-450 block uppercase text-[8.5px] font-mono">School Assessment:</span> {form.data.schoolName || 'N/A'} ({form.data.schoolLocation || 'N/A'})</div>
+                                        <div><span className="font-bold text-slate-450 block uppercase text-[8.5px] font-mono">School Type & Level:</span> {form.data.schoolType || 'N/A'} ({form.data.schoolLevel || 'N/A'})</div>
+                                      </div>
+
+                                      <div className="space-y-1">
+                                        <span className="font-bold text-teal-800 block uppercase text-[9px] tracking-wider font-mono">🏫 Learner Welfare Ratings:</span>
+                                        <div className="space-y-1 p-2 bg-white border border-slate-200 rounded-lg text-[10px]">
+                                          <div className="flex justify-between border-b pb-1"><span>Has School Uniform:</span> <span className="font-bold text-slate-800">{form.data.welfare_0 || 'N/A'} ({form.data.welfare_remarks_0 || '-'})</span></div>
+                                          <div className="flex justify-between border-b pb-1"><span>Has Learning Materials:</span> <span className="font-bold text-slate-800">{form.data.welfare_1 || 'N/A'} ({form.data.welfare_remarks_1 || '-'})</span></div>
+                                          <div className="flex justify-between border-b pb-1"><span>Appears Healthy:</span> <span className="font-bold text-slate-800">{form.data.welfare_2 || 'N/A'} ({form.data.welfare_remarks_2 || '-'})</span></div>
+                                          <div className="flex justify-between border-b pb-1"><span>Attends School Regularly:</span> <span className="font-bold text-slate-800">{form.data.welfare_3 || 'N/A'} ({form.data.welfare_remarks_3 || '-'})</span></div>
+                                        </div>
+                                      </div>
+
+                                      <div className="space-y-1">
+                                        <span className="font-bold text-teal-800 block uppercase text-[9px] tracking-wider font-mono">🧑‍🏫 Educator & Learner Discussion notes:</span>
+                                        <div className="p-2 bg-white border border-slate-200 rounded-lg space-y-2">
+                                          {form.data.metTeacher === 'Yes' && (
+                                            <div>
+                                              <span className="font-bold text-slate-600 block">Class Teacher Met ({form.data.teacherName || 'N/A'}):</span>
+                                              <p className="italic text-slate-650 font-serif">"{form.data.teacherComments || 'No comments'}"</p>
+                                            </div>
+                                          )}
+                                          {form.data.metPrincipal === 'Yes' && (
+                                            <div>
+                                              <span className="font-bold text-slate-600 block">Head Teacher Met ({form.data.principalName || 'N/A'}):</span>
+                                              <p className="italic text-slate-650 font-serif">"{form.data.principalComments || 'No comments'}"</p>
+                                            </div>
+                                          )}
+                                          <div>
+                                            <span className="font-bold text-slate-600 block">Learner's Feedback in Own Words:</span>
+                                            <p className="italic text-slate-650 text-[10.5px]">"{form.data.learnerFeedback || 'N/A'}"</p>
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      <div className="space-y-1">
+                                        <span className="font-bold text-teal-800 block uppercase text-[9px] tracking-wider font-mono">🎁 Support Usage Status:</span>
+                                        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 p-2 bg-white border border-slate-200 rounded-lg text-[10px]">
+                                          <div><span>SCHOOL FEES:</span> <span className="font-bold text-slate-800">{form.data.feesPaid === 'Yes' ? `Paid (${form.data.feesAmt || 'N/A'})` : 'No'}</span></div>
+                                          <div><span>UNIFORM SUPPLY:</span> <span className="font-semibold text-slate-800">{form.data.uniformProv === 'Yes' ? `Provided (${form.data.uniformDate || 'N/A'})` : 'No'}</span></div>
+                                          <div><span>BOOKS PROVIDED:</span> <span className="font-semibold text-slate-800">{form.data.booksProv === 'Yes' ? `${form.data.booksList || 'Yes'}` : 'No'}</span></div>
+                                          <div><span>OTHER SUPPORT:</span> <span className="font-semibold text-slate-800">{form.data.otherSupport || 'None'}</span></div>
+                                        </div>
+                                      </div>
+
+                                      <div className="space-y-1">
+                                        <span className="font-bold text-indigo-805 block uppercase text-[9px] tracking-wider font-mono">📋 Observations & Recommendations:</span>
+                                        <div className="space-y-1.5 p-2.5 bg-slate-100 rounded-lg text-slate-800">
+                                          <div><span className="font-bold text-slate-550 mr-1 text-[9px] font-mono">GENERAL NOTES:</span> {form.data.observations || 'N/A'}</div>
+                                          <div><span className="font-bold text-slate-550 mr-1 text-[9px] font-mono">ACTION RECOMMENDATIONS:</span> <span className="font-medium text-indigo-905">{form.data.recommendations || 'N/A'}</span></div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Fallback rendering of any other simple form */}
+                                  {form.type !== 'Home Visit' && form.type !== 'School Visit' && (
+                                    <div className="space-y-2">
+                                      <div><span className="font-bold text-slate-500 block uppercase text-[8.5px] font-mono">Date:</span> {formatToReadableDate(form.date)}</div>
+                                      <div><span className="font-bold text-slate-500 block uppercase text-[8.5px] font-mono">Reason:</span> {form.data.purpose || 'N/A'}</div>
+                                      <div>
+                                        <span className="font-bold text-slate-500 block uppercase text-[8.5px] font-mono">Summary Notes:</span>
+                                        <div className="p-2 bg-white rounded border border-slate-200 mt-1 font-mono text-[10px] whitespace-pre-wrap">{form.data.summary || 'N/A'}</div>
+                                      </div>
+                                      {form.data.actionItems && (
+                                        <div>
+                                          <span className="font-bold text-slate-500 block uppercase text-[8.5px] font-mono">Action Items:</span>
+                                          <div className="p-2 bg-white rounded border border-slate-200 mt-1">{form.data.actionItems}</div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="text-center py-4 bg-slate-50 rounded-lg border border-dashed border-slate-200">
+                        <span className="text-xs text-slate-400 font-medium font-sans">No assessments have been recorded.</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ✨ AI CAREGIVER SMS OUTREACH & COMMUNICATION HUB */}
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3 shadow-3xs text-left">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-indigo-750">
+                      <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
+                      <h4 className="text-xs font-extrabold uppercase tracking-wider font-mono">
+                        ✨ AI Caregiver SMS Outreach Hub
+                      </h4>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSmsAccordionExpanded(!smsAccordionExpanded)}
+                      className="text-[10px] font-bold text-indigo-700 hover:text-indigo-850 bg-white border border-slate-200 px-2.5 py-1 rounded-lg transition-all hover:bg-slate-100 cursor-pointer shadow-3xs"
+                    >
+                      {smsAccordionExpanded ? 'Hide Workspace' : 'Open Workspace'}
+                    </button>
+                  </div>
+                  <p className="text-[10.5px] text-slate-550 leading-relaxed">
+                    Instantly compose respectful, supportive Karimojong child-development SMS check-ins. Convert dashboard stats or dossier metrics on file into outreach messages.
+                  </p>
+
+                  {smsAccordionExpanded && (
+                    <div className="space-y-3 bg-white border border-slate-200/80 rounded-xl p-3.5 shadow-2xs">
+                      {/* Campaign Selection */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div className="space-y-1">
+                          <label className="text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono block">Outreach Campaign</label>
+                          <select
+                            value={smsCampaignType}
+                            onChange={(e) => setSmsCampaignType(e.target.value as any)}
+                            className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs py-1.5 px-2 text-slate-705 font-bold focus:outline-none cursor-pointer"
+                          >
+                            <option value="absenteeism">⚠️ Absenteeism Warning</option>
+                            <option value="praise">🎉 Attendance Praise</option>
+                            <option value="home_visit">🏡 Home Visit Proposal</option>
+                            <option value="medical">🏥 Medical Follow-up</option>
+                            <option value="academic">🏫 Academic Check-in</option>
+                          </select>
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono block">Tone & Disposition</label>
+                          <select
+                            value={smsTone}
+                            onChange={(e) => setSmsTone(e.target.value as any)}
+                            className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs py-1.5 px-2 text-slate-705 font-bold focus:outline-none cursor-pointer"
+                          >
+                            <option value="polite">🤝 Polite & Direct</option>
+                            <option value="urgent">📢 Urgent & Actionable</option>
+                            <option value="collaborative">❤️ Warm & Collaborative</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Optional Context */}
+                      <div className="space-y-1">
+                        <label className="text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono block">Additional Caseworker Context (Optional)</label>
+                        <input
+                          type="text"
+                          value={smsExtraContext}
+                          onChange={(e) => setSmsExtraContext(e.target.value)}
+                          placeholder="e.g., mention medical rest, ask about road conditions, include family prayer request..."
+                          className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs focus:outline-none focus:border-indigo-500 placeholder:text-slate-400"
+                        />
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={handleGenerateSmsWithGemini}
+                          disabled={isSmsGenerating}
+                          className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[10.5px] py-2 px-3 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                        >
+                          {isSmsGenerating ? (
+                            <>
+                              <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                              <span>Optimizing with Gemini...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
+                              <span>✨ Optimize Message with Gemini AI</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Display draft message */}
+                      <div className="space-y-1 pt-1">
+                        <div className="flex items-center justify-between text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono">
+                          <span>SMS Copy Draft Preview</span>
+                          <span>{smsDraftMessage.length} characters</span>
+                        </div>
+                        <div className="relative">
+                          <textarea
+                            value={smsDraftMessage}
+                            onChange={(e) => setSmsDraftMessage(e.target.value)}
+                            rows={4}
+                            className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-700 leading-relaxed font-sans placeholder:text-slate-400 focus:outline-none focus:border-slate-350"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Success / Status Info */}
+                      {smsSuccessMsg && (
+                        <div className="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg p-1.5 px-2.5 text-center transition-all animate-fade-in animate-duration-300">
+                          {smsSuccessMsg}
+                        </div>
+                      )}
+
+                      {/* Africa's Talking API Dispatch Status */}
+                      {directSmsResponse && (
+                        <div className={`p-2.5 rounded-xl border text-[10.5px] font-bold transition-all ${
+                          directSmsResponse.success 
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                            : 'bg-rose-50 border-rose-200 text-rose-800'
+                        }`}>
+                          <div className="flex items-start gap-2">
+                            {directSmsResponse.success ? (
+                              <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                            ) : (
+                              <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                            )}
+                            <div className="space-y-1">
+                              <p className="leading-snug">{directSmsResponse.message}</p>
+                              {directSmsResponse.isSimulated && (
+                                <p className="text-[9.5px] text-indigo-700 font-normal leading-relaxed">
+                                  💡 <b>Credentials Setup:</b> To send live messages directly from the system, configure <b>AFRICASTALKING_API_KEY</b> and <b>AFRICASTALKING_USERNAME</b> in the AI Studio Settings menu.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Primary Direct Send Action */}
+                      <button
+                        type="button"
+                        onClick={handleSendDirectSms}
+                        disabled={isSendingDirectSms || !smsDraftMessage.trim()}
+                        className="w-full bg-slate-900 hover:bg-slate-950 text-white font-extrabold text-xs py-2.5 px-4 rounded-xl shadow-2xs hover:shadow-3xs transition-all duration-200 cursor-pointer flex items-center justify-center gap-2 border border-slate-950 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {isSendingDirectSms ? (
+                          <>
+                            <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                            <span>Broadcasting directly to mobile...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Wifi className="w-4 h-4 text-amber-400 animate-pulse shrink-0" />
+                            <span>⚡ Send Direct via Africa's Talking API Gateway</span>
+                          </>
+                        )}
+                      </button>
+
+                      <div className="grid grid-cols-2 gap-2 pt-0.5 border-t border-slate-100 mt-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(smsDraftMessage);
+                            setSmsCopied(true);
+                            setTimeout(() => setSmsCopied(false), 2000);
+                          }}
+                          className="py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-3xs"
+                        >
+                          {smsCopied ? (
+                            <>
+                              <Check className="w-4 h-4 text-emerald-500" />
+                              <span className="text-emerald-600 font-extrabold">Copied!</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5 text-slate-400" />
+                              <span>Copy Message</span>
+                            </>
+                          )}
+                        </button>
+
+                        <a
+                          href={`sms:${inspectedParticipant.contact?.replace(/[^0-9+]/g, '') || ''}?body=${encodeURIComponent(smsDraftMessage)}`}
+                          className="py-2 bg-slate-100 hover:bg-slate-200 text-slate-705 font-bold text-xs rounded-xl text-center cursor-pointer transition-all flex items-center justify-center gap-2 shadow-3xs border border-slate-200/60"
+                        >
+                          <MessageSquare className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                          <span>Use Native SMS</span>
+                        </a>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* 5. MANAGER ACTION NOTES LOG */}
@@ -9938,13 +13941,13 @@ export default function App() {
                         No previous outreach logs on file. Use the workspace above to track first contact.
                       </em>
                     ) : (
-                      inspectedParticipant.outreachNotes.map(log => {
+                      inspectedParticipant.outreachNotes.map((log, idx) => {
                         let statusColor = 'bg-amber-100 text-amber-800';
                         if (log.status === 'resolved') statusColor = 'bg-emerald-150 text-emerald-800 border border-emerald-250';
                         if (log.status === 'contacted') statusColor = 'bg-sky-100 text-sky-805 border border-sky-200';
 
                         return (
-                          <div key={log.id} className="p-3.5 bg-white border border-slate-250 rounded-xl space-y-1.5 relative group/log shadow-3xs">
+                          <div key={`${log.id}-${idx}`} className="p-3.5 bg-white border border-slate-250 rounded-xl space-y-1.5 relative group/log shadow-3xs">
                             <div className="flex items-center justify-between text-xs">
                               <div className="flex items-center gap-2">
                                 <span className={`text-[9px] font-bold uppercase rounded px-1.5 py-0.2 ${statusColor}`}>
@@ -10059,6 +14062,30 @@ export default function App() {
 
                       <div className="grid grid-cols-2 gap-2">
                         <div>
+                          <label className="text-[10px] text-slate-500 font-bold block mb-1">SCHOOL STATUS</label>
+                          <select 
+                            value={editSchoolingStatus} 
+                            onChange={(e) => setEditSchoolingStatus(e.target.value)} 
+                            className="w-full bg-white border border-slate-300 rounded-lg px-2 py-1 text-slate-800 text-xs focus:outline-none focus:border-indigo-500" 
+                          >
+                            <option value="Day Scholar">Day Scholar</option>
+                            <option value="Boarder">Boarder</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-500 font-bold block mb-1">CLASS</label>
+                          <input 
+                            type="text" 
+                            value={editSchoolClass} 
+                            onChange={(e) => setEditSchoolClass(e.target.value)} 
+                            className="w-full bg-white border border-slate-300 rounded-lg px-2 py-1 text-slate-800 text-xs focus:outline-none focus:border-indigo-500" 
+                            placeholder="e.g. Primary 4"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
                           <label className="text-[10px] text-slate-500 font-bold block mb-1">CAREGIVER</label>
                           <input 
                             type="text" 
@@ -10122,6 +14149,8 @@ export default function App() {
                                 gender: editGender.trim() || '-',
                                 village: editVillage.trim() || '-',
                                 caregiver: editCaregiver.trim() || '-',
+                                schoolingStatus: editSchoolingStatus.trim() || 'Day Scholar',
+                                schoolClass: editSchoolClass.trim() || '-',
                                 cohort: editCohort,
                                 contact: editContact.trim() || '-',
                                 registrationNotes: editRegistrationNotes.trim()
@@ -10129,6 +14158,7 @@ export default function App() {
                             }
                             return p;
                           }));
+                          logSystemAction('transaction', 'Profile Manually Updated', `Updated registration details and intake demographics for active student ${editName.trim()} (ID: ${editIdNo.trim()}).`);
                           setIsEditingProfile(false);
                         }}
                         className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-center flex-1 cursor-pointer transition-colors shadow-2xs"
@@ -10189,6 +14219,14 @@ export default function App() {
                         <span className="font-medium text-slate-800">{inspectedParticipant.caregiver || '-'}</span>
                       </div>
                       <div className="flex justify-between border-b border-slate-100 pb-1">
+                        <span className="text-slate-400 font-medium">School Status:</span>
+                        <span className="font-medium text-slate-800">{inspectedParticipant.schoolingStatus || 'Day Scholar'}</span>
+                      </div>
+                      <div className="flex justify-between border-b border-slate-100 pb-1">
+                        <span className="text-slate-400 font-medium">Class:</span>
+                        <span className="font-medium text-slate-800">{inspectedParticipant.schoolClass || '-'}</span>
+                      </div>
+                      <div className="flex justify-between border-b border-slate-100 pb-1">
                         <span className="text-slate-400 font-medium">Date Enrolled:</span>
                         <span className="font-medium text-slate-800">{formatToReadableDate(inspectedParticipant.joinDate)}</span>
                       </div>
@@ -10217,6 +14255,8 @@ export default function App() {
                             setEditGender(inspectedParticipant.gender || '');
                             setEditVillage(inspectedParticipant.village || '');
                             setEditCaregiver(inspectedParticipant.caregiver || '');
+                            setEditSchoolingStatus(inspectedParticipant.schoolingStatus || 'Day Scholar');
+                            setEditSchoolClass(inspectedParticipant.schoolClass || '');
                             setEditCohort(inspectedParticipant.cohort);
                             setEditContact(inspectedParticipant.contact);
                             setEditRegistrationNotes(inspectedParticipant.registrationNotes || '');
@@ -10263,6 +14303,433 @@ export default function App() {
             </motion.div>
           </div>
         )}
+
+        {/* STRUCTURED FORMS MODAL */}
+        <FormModal 
+          isOpen={isFormModalOpen}
+          onClose={() => setIsFormModalOpen(false)}
+          participantName={inspectedParticipant?.name}
+          onSave={(type, data) => {
+            if (inspectedParticipant) {
+              // Reusing state from App: setFormType and formData temporarily
+              // but handled immediately by handleSaveFilledForm using arguments if we adjust it.
+              // Wait, handleSaveFilledForm reads from `formType` & `formData` state. 
+              // We should pass them directly to the function.
+              
+              // We will just call a refactored bound block or use the states:
+              setFormType(type as any);
+              setFormData(data);
+              
+              // We can't rely on state updates immediately, so let's call the updated handleSave.
+              // Actually we can just create the object here:
+              const newForm: FilledForm = {
+                id: `form_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+                type: type as any,
+                date: new Date().toISOString(),
+                data: data
+              };
+              
+              setParticipants(prev => prev.map(p => {
+                if (p.id === inspectedParticipant.id) {
+                  return { ...p, filledForms: [newForm, ...(p.filledForms || [])] };
+                }
+                return p;
+              }));
+              setIsFormModalOpen(false);
+            }
+          }}
+        />
+
+        <SessionInspectorModal 
+          isOpen={!!selectedSessionDate}
+          onClose={() => setSelectedSessionDate(null)}
+          session={currentSessionObj}
+          attendanceStats={currentSessionStats}
+          onUpdateSession={handleUpdateSessionData}
+        />
+
+        {/* EMAIL ALERT DISPATCH & SETTINGS MODAL */}
+        {isEmailAlertModalOpen && (
+          <div className="fixed inset-0 z-50 overflow-hidden flex items-center justify-center p-4" id="modal-email-alerts">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.4 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setIsEmailAlertModalOpen(false);
+                setEmailAlertSuccess(null);
+                setEmailAlertError(null);
+              }}
+              className="absolute inset-0 bg-slate-900"
+            />
+
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 10 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 10 }}
+              className="bg-white border border-slate-250 rounded-2xl w-full max-w-lg shadow-2xl relative z-10 overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              {/* Header */}
+              <div className="p-4 border-b border-indigo-100 flex items-center justify-between bg-indigo-50/50">
+                <div className="flex items-center gap-2">
+                  <div className="p-1 px-1.5 rounded-lg bg-indigo-100 text-indigo-700 font-bold">
+                    <Mail className="h-4 w-4 inline-block align-middle" />
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-widest font-mono">
+                      Welfare Alert Center
+                    </h3>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => {
+                    setIsEmailAlertModalOpen(false);
+                    setEmailAlertSuccess(null);
+                    setEmailAlertError(null);
+                  }}
+                  className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer hover:bg-slate-100 rounded-lg transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="p-5 overflow-y-auto space-y-5 shrink">
+                
+                {/* 1. Target Session Selection */}
+                <div className="bg-slate-50 border border-slate-205 p-3 rounded-xl space-y-2">
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider font-mono">
+                    Target Session
+                  </label>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <select
+                      value={emailModalSelectedDate || ''}
+                      onChange={(e) => setEmailModalSelectedDate(e.target.value)}
+                      className="bg-white border border-slate-250 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-slate-850 focus:outline-none focus:border-indigo-500 flex-1"
+                    >
+                      <option value="">-- Choose session --</option>
+                      {sessions.map((s, idx) => {
+                        const isEmailed = emailedSessionDates.includes(s.date);
+                        // Is it fully marked?
+                        const isFullyMarked = activeParticipants.length > 0 && activeParticipants.every(p => {
+                          const status = attendance[p.id]?.[s.date];
+                          return status && status !== 'unmarked';
+                        });
+                        return (
+                          <option key={`${s.date}-${idx}`} value={s.date}>
+                            {s.date} {s.label ? `(${s.label})` : ''} 
+                            {isFullyMarked ? " [Marked Complete]" : " [Incomplete]"}
+                            {isEmailed ? " 📧 [Dispatched]" : " ⚠️ [Unscheduled]"}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    {emailModalSelectedDate && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (emailedSessionDates.includes(emailModalSelectedDate)) {
+                            setEmailedSessionDates(prev => {
+                              const updated = prev.filter(d => d !== emailModalSelectedDate);
+                              localStorage.setItem('attendance_tracker_emailed_session_dates', JSON.stringify(updated));
+                              return updated;
+                            });
+                          } else {
+                            setEmailedSessionDates(prev => {
+                              const updated = [...prev, emailModalSelectedDate];
+                              localStorage.setItem('attendance_tracker_emailed_session_dates', JSON.stringify(updated));
+                              return updated;
+                            });
+                          }
+                        }}
+                        className="text-[9px] bg-slate-200 hover:bg-slate-300 text-slate-805 transition-colors font-bold px-2.5 py-1.5 rounded-lg cursor-pointer shrink-0"
+                        title="Toggle whether this session is marked as already emailed manually."
+                      >
+                        {emailedSessionDates.includes(emailModalSelectedDate) ? "Mark Unsend" : "Mark Sent"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Overviews */}
+                {emailModalSelectedDate && (() => {
+                  const sObj = sessions.find(s => s.date === emailModalSelectedDate);
+                  if (!sObj) return null;
+                  
+                  // Compute statistics
+                  const stats = activeParticipants.reduce((acc, p) => {
+                    const status = attendance[p.id]?.[sObj.date] || 'unmarked';
+                    acc[status] = (acc[status] || 0) + 1;
+                    return acc;
+                  }, {} as Record<string, number>);
+
+                  const rAlerts = activeParticipants.filter(p => {
+                    const stat = participantStatsMap[p.id];
+                    return stat?.hasRedFlag && !isRedAlertSuppressed(p);
+                  });
+
+                  const yAlerts = activeParticipants.filter(p => {
+                    const stat = participantStatsMap[p.id];
+                    return stat?.hasYellowFlag && !isRedAlertSuppressed(p);
+                  });
+
+                  return (
+                    <div className="border border-indigo-100 rounded-xl p-3 bg-indigo-50/20 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] uppercase font-bold text-slate-800 font-mono">Transmitting Preview</span>
+                        <span className={`text-[9px] uppercase font-bold px-1.5 py-0.2 rounded ${
+                          emailedSessionDates.includes(sObj.date) ? 'bg-emerald-100 text-emerald-800 border border-emerald-250' : 'bg-amber-100 text-amber-800 border border-amber-200'
+                        }`}>
+                          {emailedSessionDates.includes(sObj.date) ? "Dispatched" : "Awaiting Dispatch"}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-4 gap-1.5 text-center text-xs pt-1">
+                        <div className="bg-white border rounded p-1.5 shadow-3xs">
+                          <span className="block text-[8px] text-slate-405 uppercase font-black font-mono">Present</span>
+                          <span className="font-bold text-emerald-600 font-mono text-xs">{stats.present || 0}</span>
+                        </div>
+                        <div className="bg-white border rounded p-1.5 shadow-3xs">
+                          <span className="block text-[8px] text-slate-405 uppercase font-black font-mono">Absent</span>
+                          <span className="font-bold text-rose-500 font-mono text-xs">{stats.absent || 0}</span>
+                        </div>
+                        <div className="bg-white border rounded p-1.5 shadow-3xs">
+                          <span className="block text-[8px] text-slate-405 uppercase font-black font-mono">Red Cases</span>
+                          <span className="font-bold text-red-600 font-mono text-xs">{rAlerts.length}</span>
+                        </div>
+                        <div className="bg-white border rounded p-1.5 shadow-3xs">
+                          <span className="block text-[8px] text-slate-405 uppercase font-black font-mono">Yellow Cases</span>
+                          <span className="font-bold text-amber-500 font-mono text-xs">{yAlerts.length}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* 2. Editable Recipient Info */}
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider font-mono">
+                    Recipient Staff Email (Editable)
+                  </label>
+                  <input
+                    type="email"
+                    value={staffEmailRecipient}
+                    onChange={(e) => {
+                      setStaffEmailRecipient(e.target.value);
+                      localStorage.setItem('attendance_tracker_staff_email_recipient', e.target.value);
+                    }}
+                    placeholder="e.g., lomuriangolecydc@gmail.com"
+                    className="w-full bg-slate-50 hover:bg-slate-100/50 border border-slate-205 focus:bg-white rounded-xl px-2.5 py-1.5 text-xs font-semibold focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
+                  <p className="text-[9.5px] text-slate-450 leading-relaxed font-sans mt-0.5">
+                    Alert letters are dispatched directly to this recipient. Defaults to <strong>lomuriangolecydc@gmail.com</strong>.
+                  </p>
+                </div>
+
+                {/* 3. Toggle for banner prompts */}
+                <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl flex items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    id="auto-email-alerts-toggle-modal"
+                    checked={isAutomaticEmailEnabled}
+                    onChange={(e) => {
+                      const val = e.target.checked;
+                      setIsAutomaticEmailEnabled(val);
+                      localStorage.setItem('attendance_tracker_auto_email_enabled', String(val));
+                    }}
+                    className="mt-0.5 h-3.5 w-3.5 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                  />
+                  <div className="flex-1">
+                    <label htmlFor="auto-email-alerts-toggle-modal" className="block text-[10.5px] font-bold text-slate-700 uppercase tracking-wider font-mono cursor-pointer select-none">
+                      Enable App Workspace Prompt Banners
+                    </label>
+                    <p className="text-[9px] text-slate-400 leading-relaxed mt-0.5 font-sans">
+                      Displays interactive banners proposing alert email dispatch whenever session registers are complete. Will never transmit emails without explicit clicking.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Messages */}
+                {emailAlertSuccess && (
+                  <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-805 text-[10.5px] font-medium leading-relaxed">
+                    🎉 {emailAlertSuccess}
+                  </div>
+                )}
+                {emailAlertError && (
+                  <div className="p-2.5 bg-rose-50 border border-rose-250 rounded-xl text-rose-805 text-[10.5px] font-medium leading-relaxed">
+                    ⚠️ {emailAlertError}
+                  </div>
+                )}
+
+              </div>
+
+              {/* Footer */}
+              <div className="p-3 border-t border-slate-150 bg-slate-50 flex items-center justify-end gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEmailAlertModalOpen(false);
+                    setEmailAlertSuccess(null);
+                    setEmailAlertError(null);
+                  }}
+                  className="px-3 py-1.5 border border-slate-200 hover:bg-slate-100 text-slate-750 rounded-xl text-xs font-semibold cursor-pointer transition-colors"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!emailModalSelectedDate) {
+                      alert("Please choose a target session first!");
+                      return;
+                    }
+                    let confirmMsg = `Are you sure you want to dispatch the Case alerts email summary for Session ${emailModalSelectedDate} to ${staffEmailRecipient}?`;
+                    if (emailedSessionDates.includes(emailModalSelectedDate)) {
+                      confirmMsg = `🚨 WARNING: An alert summary has ALREADY been successfully dispatched to staff for Session ${emailModalSelectedDate}.\n\nTo prevent sending hundreds of duplicate emails, we highly advise sending only one alert summary per completed session.\n\nAre you sure you want to RE-SEND / RE-TRANSMIT this alert summary anyway?`;
+                    }
+                    if (googleAccessToken) {
+                      if (window.confirm(confirmMsg)) {
+                        sendOutreachEmailAlert(emailModalSelectedDate, true);
+                      }
+                    } else {
+                      alert("This action will request Google Account permission to send an email secure proxy. Please authorize the email permission popup.");
+                      sendOutreachEmailAlert(emailModalSelectedDate, true);
+                    }
+                  }}
+                  disabled={!emailModalSelectedDate || isSendingEmailAlert}
+                  className={`px-3 py-1.5 border border-transparent rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-3xs transition-colors ${
+                    !emailModalSelectedDate
+                      ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
+                      : isSendingEmailAlert
+                      ? 'bg-indigo-400 text-white cursor-wait'
+                      : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                  }`}
+                >
+                  {isSendingEmailAlert ? (
+                    <>
+                      <RefreshCw className="h-3 w-3 animate-spin shrink-0" />
+                      <span>Sending...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Mail className="h-3 w-3 shrink-0" />
+                      <span>Send Single Email Now</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+            </motion.div>
+          </div>
+        )}
+
+        {/* MODAL: QUICK INTERVENTION LOG FOR LOW ATTENDANCE */}
+        {quickLogParticipantId && (() => {
+          const quickP = participants.find(p => p.id === quickLogParticipantId);
+          if (!quickP) return null;
+          return (
+            <div className="fixed inset-0 z-[70] overflow-hidden flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 0.4 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setQuickLogParticipantId(null)}
+                className="absolute inset-0 bg-slate-900"
+              />
+
+              <motion.div 
+                initial={{ scale: 0.95, opacity: 0, y: 10 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                className="relative bg-white border border-slate-250 rounded-2xl w-full max-w-md shadow-2xl z-10 overflow-hidden"
+              >
+                {/* Header */}
+                <div className="p-4 border-b border-rose-100 flex items-center justify-between bg-rose-50/50">
+                  <div className="flex items-center gap-2 text-rose-850">
+                    <span className="p-1 px-1.5 bg-rose-600 rounded-lg text-white font-sans text-[10px] font-bold">CASE</span>
+                    <div>
+                      <h4 className="text-xs font-bold text-rose-900 uppercase tracking-wide font-sans">
+                        Quick Intervention Log
+                      </h4>
+                      <p className="text-[10px] text-rose-700/80 font-sans font-medium">
+                        For low attendance threshold drop (&lt;80%)
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setQuickLogParticipantId(null)}
+                    type="button"
+                    className="p-1 rounded-lg hover:bg-slate-200 text-slate-400 hover:text-slate-600 transition-colors"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+
+                {/* Form */}
+                <form onSubmit={handleQuickLogSubmit} className="p-5 space-y-4 text-xs">
+                  <div className="bg-slate-50 border border-slate-150 p-3 rounded-xl">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase block mb-1">Target Participant</span>
+                    <span className="font-bold text-slate-850 text-sm block">{quickP.name}</span>
+                    <span className="text-[10px] text-slate-500 block mt-0.5 font-mono">Primary Contact: {quickP.contact}</span>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-705 block">Outreach Call/Visit Notes *</label>
+                    <textarea
+                      required
+                      value={quickLogNotes}
+                      onChange={(e) => setQuickLogNotes(e.target.value)}
+                      placeholder="e.g. Spoke to caregiver. Student had malaria last week but is fully recovering and will attend starting tomorrow."
+                      className="w-full h-24 bg-slate-150 border border-slate-200 p-2.5 rounded-xl text-slate-800 focus:bg-white focus:outline-hidden focus:border-rose-500 transition-colors resize-none leading-relaxed"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-705 block">Logged By Name *</label>
+                      <input
+                        type="text"
+                        required
+                        value={quickLogBy}
+                        onChange={(e) => setQuickLogBy(e.target.value)}
+                        placeholder="Educator / Social Worker"
+                        className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-medium focus:bg-white focus:outline-hidden focus:border-rose-500 transition-all"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-705 block">Intervention Status *</label>
+                      <select
+                        value={quickLogStatus}
+                        onChange={(e) => setQuickLogStatus(e.target.value as any)}
+                        className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl font-semibold text-slate-705 cursor-pointer focus:bg-white focus:outline-hidden"
+                      >
+                        <option value="pending">⏳ Pending/Follow-Up</option>
+                        <option value="contacted">📞 Connected/Contacted</option>
+                        <option value="resolved">✅ Resolved/Settled</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setQuickLogParticipantId(null)}
+                      className="px-4 py-2 border border-slate-200 text-slate-650 hover:bg-slate-50 rounded-xl font-bold font-sans transition-all cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold font-sans transition-all cursor-pointer shadow-3xs"
+                    >
+                      Save Outreach Entry
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
+          );
+        })()}
 
         {/* MODAL SECTION 2: ADD PARTICIPANT FORM */}
         {isAddParticipantOpen && (
@@ -10392,6 +14859,37 @@ export default function App() {
                       value={newPartCaregiver}
                       onChange={(e) => setNewPartCaregiver(e.target.value)}
                       placeholder="e.g. Grace Okafor"
+                      className="w-full bg-slate-50 border border-slate-250 rounded-xl p-2.5 text-xs focus:bg-white focus:outline-none focus:border-slate-400"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3.5 mb-3.5 mt-3.5">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700 block mb-1.5">Schooling Status</label>
+                    <div className="relative">
+                      <select
+                        value={newPartSchoolingStatus}
+                        onChange={(e) => setNewPartSchoolingStatus(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-250 rounded-xl p-2.5 text-xs focus:bg-white focus:outline-none focus:border-slate-400 appearance-none font-medium"
+                      >
+                        <option value="Day Scholar">Day Scholar</option>
+                        <option value="Boarder">Boarder</option>
+                      </select>
+                      <div className="absolute right-3 top-[50%] -translate-y-1/2 pointer-events-none">
+                        <svg className="h-3 w-3 text-slate-400" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700 block mb-1.5">Class</label>
+                    <input
+                      type="text"
+                      value={newPartSchoolClass}
+                      onChange={(e) => setNewPartSchoolClass(e.target.value)}
+                      placeholder="e.g. Primary 5"
                       className="w-full bg-slate-50 border border-slate-250 rounded-xl p-2.5 text-xs focus:bg-white focus:outline-none focus:border-slate-400"
                     />
                   </div>
@@ -10557,7 +15055,7 @@ export default function App() {
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white border border-slate-250 rounded-2xl w-full max-w-2xl shadow-2xl relative z-10 overflow-hidden flex flex-col max-h-[90vh]"
+              className="bg-white border border-slate-250 rounded-2xl w-full max-w-4xl shadow-2xl relative z-10 overflow-hidden flex flex-col max-h-[90vh]"
             >
               {/* Header */}
               <div className="p-5 border-b border-slate-150 flex items-center justify-between bg-slate-50">
@@ -10632,6 +15130,23 @@ export default function App() {
                     }`}
                   >
                     Upload / Drop File
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setImportTab('google-forms');
+                      if (googleAccessToken && googleFormsList.length === 0) {
+                        handleBrowseGoogleForms(googleAccessToken);
+                      }
+                    }}
+                    className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                      importTab === 'google-forms' 
+                        ? 'bg-indigo-650 text-white shadow-2xs' 
+                        : 'text-slate-500 hover:text-slate-900'
+                    }`}
+                  >
+                    <Sparkles className="h-3 w-3 animate-pulse text-indigo-200 animate-bounce" />
+                    Google Forms Sync
                   </button>
                 </div>
 
@@ -10720,133 +15235,790 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Live Candidate Preview Panel */}
-                {parsedImportList.length > 0 && (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider font-mono flex items-center gap-1.5">
-                        <span className="h-2 w-2 rounded-full bg-indigo-500"></span>
-                        Discovered Candidates List ({parsedImportList.length})
-                      </h4>
-                      
-                      {/* Global action summary label */}
-                      {(() => {
-                        const valids = parsedImportList.filter(p => p.isValid).length;
-                        const invalids = parsedImportList.length - valids;
-                        return (
-                          <span className="text-[10px] text-slate-500 font-medium font-sans">
-                            {valids} ready to import{invalids > 0 ? ` • ${invalids} errors to review` : ''}
-                          </span>
-                        );
-                      })()}
-                    </div>
+                {/* Tab content 3: Google Forms Integration Panel */}
+                {importTab === 'google-forms' && (
+                  <div className="space-y-4 animate-fadeIn">
+                    {/* Authorization Status / Trigger Banner */}
+                    {!googleAccessToken ? (
+                      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 text-center flex flex-col items-center justify-center space-y-4">
+                        <div className="h-12 w-12 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
+                          <Lock className="h-6 w-6" />
+                        </div>
+                        <div className="max-w-md space-y-1">
+                          <h4 className="text-sm font-bold text-slate-800">Verify Google Forms Account Connection</h4>
+                          <p className="text-xs text-slate-500 leading-relaxed">
+                            To load questions and dynamically fetch student/participant registration details from your Google Forms, authorize your workspace now.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleBrowseGoogleForms()}
+                          className="gsi-material-button text-xs font-semibold py-2.5 px-4 shadow-sm"
+                          style={{
+                            background: '#F2F2F2',
+                            color: '#1f1f1f',
+                            alignItems: 'center',
+                            borderRadius: '4px',
+                            border: '1px solid #dadce0',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            height: '40px',
+                            justifyContent: 'center',
+                            padding: '0 12px',
+                            minWidth: '200px'
+                          }}
+                        >
+                          <div className="gsi-material-button-icon" style={{ height: '20px', marginRight: '12px', width: '20px' }}>
+                            <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" style={{ display: 'block' }}>
+                              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                            </svg>
+                          </div>
+                          <span className="gsi-material-button-contents font-medium font-sans">Authorize Access to Google Forms</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {/* Connected Status header widget */}
+                        <div className="bg-emerald-50/60 border border-emerald-155 rounded-xl p-3 flex items-center justify-between text-xs">
+                          <div className="flex items-center gap-2 text-emerald-850 font-semibold">
+                            <span className="relative flex h-2 w-2">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                            </span>
+                            <span>Google Forms Account Link Verified</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setGoogleAccessToken(null);
+                              setGoogleFormsList([]);
+                              setGoogleFormQuestions([]);
+                              setGoogleFormResponses([]);
+                            }}
+                            className="text-slate-400 hover:text-red-550 font-bold transition-all flex items-center gap-1 cursor-pointer font-sans"
+                          >
+                            <LogOut className="h-3.5 w-3.5 pb-0.5" />
+                            Disconnect Account
+                          </button>
+                        </div>
 
-                    {/* Header Columns details */}
-                    <div className="border border-slate-200 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto shadow-3xs">
-                      <table className="w-full text-left text-xs text-slate-700 border-collapse">
-                        <thead>
-                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-400 font-mono text-[10px] uppercase font-bold sticky top-0 bg-opacity-95 z-10 backdrop-blur-xs">
-                            <th className="p-2.5 text-center w-10">
-                              <input 
-                                type="checkbox"
-                                checked={parsedImportList.length > 0 && parsedImportList.every(p => p.importChecked)}
-                                onChange={() => {
-                                  const allChecked = parsedImportList.every(p => p.importChecked);
-                                  setParsedImportList(prev => prev.map(p => ({
-                                    ...p,
-                                    importChecked: p.isValid ? !allChecked : false
-                                  })));
-                                }}
-                                className="rounded text-indigo-600 focus:ring-indigo-400 cursor-pointer h-3.5 w-3.5"
-                                title="Toggle all valid"
+                        {/* Connection Inputs Panel */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {/* Pane 1: Direct link connection */}
+                          <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+                            <div>
+                              <h4 className="text-xs font-bold text-slate-800">Option A: Link Form URL or ID</h4>
+                              <p className="text-[10px] text-slate-400 mt-0.5">Paste links directly from docs.google.com/forms/d/...</p>
+                            </div>
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={googleFormUrlOrId}
+                                onChange={(e) => setGoogleFormUrlOrId(e.target.value)}
+                                placeholder="Paste Google Form Link or ID here..."
+                                className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
                               />
-                            </th>
-                            <th className="p-2.5">Participant Candidate</th>
-                            <th className="p-2.5 w-36">Cohort</th>
-                            <th className="p-2.5 text-right w-24">Integrity</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 bg-white">
-                          {parsedImportList.map((item) => (
-                            <tr key={item.id} className="hover:bg-slate-50/50">
-                              {/* Selection switch */}
-                              <td className="p-2.5 text-center">
-                                <input 
-                                  type="checkbox"
-                                  disabled={!item.isValid}
-                                  checked={item.importChecked}
-                                  onChange={() => toggleCandidateCheck(item.id)}
-                                  className="rounded text-indigo-600 focus:ring-indigo-400 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed h-3.5 w-3.5"
-                                />
-                              </td>
-                              {/* Identity */}
-                              <td className="p-2.5">
-                                <div className="space-y-1">
-                                  <span className={`font-semibold block ${item.isValid ? 'text-slate-800' : 'text-slate-400 line-through'}`}>
-                                    {item.name || <em className="text-red-400">Missing Name</em>}
-                                  </span>
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    {item.idNo && item.idNo !== '-' && (
-                                      <span className="text-[9px] font-mono font-bold text-slate-700 bg-slate-100 rounded px-1.5 py-0.2" title="ID Number">
-                                        {item.idNo}
-                                      </span>
-                                    )}
-                                    {(item.dob || item.age) && (item.dob ? calculateAgeFromDob(item.dob) : item.age) !== '-' && (
-                                      <span className="text-[9px] text-slate-500 font-sans" title="Age">
-                                        Age: {item.dob ? calculateAgeFromDob(item.dob) : item.age}
-                                      </span>
-                                    )}
-                                    {item.gender && item.gender !== '-' && (
-                                      <span className="text-[9px] text-pink-700 font-sans bg-pink-50 px-1.5 py-0.2 rounded" title="Gender">
-                                        Sex: {item.gender}
-                                      </span>
-                                    )}
-                                    {item.village && item.village !== '-' && (
-                                      <span className="text-[9px] text-indigo-700 font-sans bg-indigo-50 px-1 py-0.2/50 rounded" title="Village">
-                                        🏡 {item.village}
-                                      </span>
-                                    )}
-                                    {item.caregiver && item.caregiver !== '-' && (
-                                      <span className="text-[9px] text-slate-600 font-sans" title="Caregiver">
-                                        Caregiver: {item.caregiver}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <span className="text-[9px] text-slate-400 font-mono block">
-                                    {item.contact}
-                                  </span>
-                                </div>
-                              </td>
-                              {/* Cohort Select option */}
-                              <td className="p-2.5">
+                              <button
+                                type="button"
+                                disabled={googleFormLoading || !googleFormUrlOrId.trim()}
+                                onClick={() => handleFetchGoogleFormStructureAndResponses(googleFormUrlOrId)}
+                                className="bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[11px] px-3 py-1.5 font-bold rounded-xl transition-all cursor-pointer inline-flex items-center gap-1 shrink-0"
+                              >
+                                {googleFormLoading ? 'Syncing...' : 'Fetch Form Layout'}
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Pane 2: Browse and Select Existing from Drive */}
+                          <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <h4 className="text-xs font-bold text-slate-800">Option B: Browse Forms from Drive</h4>
+                                <p className="text-[10px] text-slate-400 mt-0.5">Select from your recently updated Google Forms</p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleBrowseGoogleForms()}
+                                className="text-[10px] font-bold text-indigo-650 hover:text-indigo-800 flex items-center gap-0.5 pointer"
+                              >
+                                <RefreshCw className={`h-3 w-3 ${googleFormLoading ? 'animate-spin' : ''}`} />
+                                Refresh list
+                              </button>
+                            </div>
+
+                            {googleFormsList.length > 0 ? (
+                              <select
+                                value={selectedGoogleFormId}
+                                onChange={(e) => {
+                                  setSelectedGoogleFormId(e.target.value);
+                                  if (e.target.value) {
+                                    setGoogleFormUrlOrId(e.target.value);
+                                    handleFetchGoogleFormStructureAndResponses(e.target.value);
+                                  }
+                                }}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs font-medium text-slate-700 cursor-pointer"
+                              >
+                                <option value="">-- Choose a Form from your Drive --</option>
+                                {googleFormsList.map((f) => (
+                                  <option key={f.id} value={f.id}>{f.name}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleBrowseGoogleForms()}
+                                className="w-full bg-slate-50 hover:bg-slate-100 border border-slate-150 border-dashed rounded-xl py-3.5 text-center text-xs text-slate-500 font-bold transition-all cursor-pointer"
+                              >
+                                {googleFormLoading ? 'Listing Forms in Drive...' : '🔍 Browse My Google Forms'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Status Message / Error Area */}
+                        {(googleFormStatusText || googleFormError) && (
+                          <div className={`p-3 rounded-xl border text-xs leading-relaxed ${
+                            googleFormError 
+                              ? 'bg-red-50 border-red-150 text-red-800' 
+                              : 'bg-indigo-50/70 border-indigo-100 text-indigo-800 font-medium'
+                          }`}>
+                            <div className="flex items-start gap-2">
+                              {googleFormError ? (
+                                <AlertTriangle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
+                              ) : (
+                                <Sparkles className="h-4 w-4 text-indigo-500 shrink-0 mt-0.5 animate-pulse" />
+                              )}
+                              <div>
+                                <span className="block font-semibold">{googleFormError ? 'Integration Issue' : 'Sync Progress'}</span>
+                                <span className="block text-[11px] mt-0.5">{googleFormError || googleFormStatusText}</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Mapping grid (Renders once questions structure fetched successfully) */}
+                        {googleFormQuestions.length > 0 && (
+                          <div className="border border-slate-200 rounded-2xl p-4 bg-gradient-to-br from-indigo-50/30 to-slate-50 space-y-4 shadow-3xs animate-fadeIn">
+                            {/* Header details */}
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 border-b border-slate-200/60 pb-3">
+                              <div>
+                                <h4 className="text-xs font-bold text-indigo-950 uppercase tracking-wider font-sans">
+                                  Google Form Layout Structure detected
+                                </h4>
+                                <p className="text-[10px] text-slate-505">
+                                  Active target form: <span className="font-semibold text-slate-700">"{googleFormTitle}"</span> ({googleFormResponses.length} registered submissions)
+                                </p>
+                              </div>
+                              <div className="bg-indigo-100/50 text-indigo-800 px-2 py-0.5 rounded text-[10px] font-bold self-start mt-1 sm:mt-0 font-mono">
+                                SCHEMA GENERATED
+                              </div>
+                            </div>
+
+                            {/* Dropdowns mapping Grid */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                              {/* Field 1: Name */}
+                              <div className="space-y-1 bg-white border border-slate-200/50 p-2 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-705 block flex items-center justify-between">
+                                  <span>Full Participant Name</span>
+                                  <span className="text-[9px] bg-red-100 text-red-700 px-1 rounded font-bold uppercase scale-90">Required</span>
+                                </label>
                                 <select
-                                  value={item.cohort}
-                                  onChange={(e) => updateCandidateCohort(item.id, e.target.value)}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none"
+                                  value={googleFormImportMapping.name}
+                                  onChange={(e) => setGoogleFormImportMapping(prev => ({ ...prev, name: e.target.value }))}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
-                                  {COHORTS.filter(c => c !== 'All Cohorts').map(coh => (
-                                    <option key={coh} value={coh}>{coh}</option>
+                                  <option value="">-- Choose Name Field --</option>
+                                  {googleFormQuestions.map((q) => (
+                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
-                              </td>
-                              {/* Safety Indicator */}
-                              <td className="p-2.5 text-right">
-                                {item.isValid ? (
-                                  <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-1.5 py-0.5 rounded uppercase font-mono">
-                                    Ready
-                                  </span>
-                                ) : (
-                                  <div className="flex flex-col items-end gap-0.5" title={item.errors.join(', ')}>
-                                    <span className="text-[9px] text-rose-600 font-bold bg-rose-50 px-1 py-0.2 rounded uppercase font-mono max-w-[85px] truncate block">
-                                      {item.errors[0]}
-                                    </span>
-                                  </div>
-                                )}
-                              </td>
+                              </div>
+
+                              {/* Field 2: Contact */}
+                              <div className="space-y-1 bg-white border border-slate-200/50 p-2 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-705 block">Contact / Email / Phone</label>
+                                <select
+                                  value={googleFormImportMapping.contact}
+                                  onChange={(e) => setGoogleFormImportMapping(prev => ({ ...prev, contact: e.target.value }))}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
+                                >
+                                  <option value="">-- Skip / Choose Question --</option>
+                                  {googleFormQuestions.map((q) => (
+                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {/* Field 3: Cohort */}
+                              <div className="space-y-1 bg-white border border-slate-200/50 p-2 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-705 block">Group Cohort</label>
+                                <select
+                                  value={googleFormImportMapping.cohort}
+                                  onChange={(e) => setGoogleFormImportMapping(prev => ({ ...prev, cohort: e.target.value }))}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
+                                >
+                                  <option value="">-- Skip / Default assignment --</option>
+                                  {googleFormQuestions.map((q) => (
+                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {/* Field 4: ID Number */}
+                              <div className="space-y-1 bg-white border border-slate-200/50 p-2 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-705 block">National ID / ID Number</label>
+                                <select
+                                  value={googleFormImportMapping.idNo}
+                                  onChange={(e) => setGoogleFormImportMapping(prev => ({ ...prev, idNo: e.target.value }))}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
+                                >
+                                  <option value="">-- Skip / Choose Question --</option>
+                                  {googleFormQuestions.map((q) => (
+                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {/* Field 5: Schooling Status */}
+                              <div className="space-y-1 bg-white border border-slate-200/50 p-2 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-705 block">Schooling (Day/Boarding)</label>
+                                <select
+                                  value={googleFormImportMapping.schoolingStatus}
+                                  onChange={(e) => setGoogleFormImportMapping(prev => ({ ...prev, schoolingStatus: e.target.value }))}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
+                                >
+                                  <option value="">-- Skip / Choose Question --</option>
+                                  {googleFormQuestions.map((q) => (
+                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {/* Field 6: School Class/Grade */}
+                              <div className="space-y-1 bg-white border border-slate-200/50 p-2 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-705 block">Class / Grade Level</label>
+                                <select
+                                  value={googleFormImportMapping.schoolClass}
+                                  onChange={(e) => setGoogleFormImportMapping(prev => ({ ...prev, schoolClass: e.target.value }))}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
+                                >
+                                  <option value="">-- Skip / Choose Question --</option>
+                                  {googleFormQuestions.map((q) => (
+                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {/* Field 7: Village */}
+                              <div className="space-y-1 bg-white border border-slate-200/50 p-2 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-705 block">Village / Location</label>
+                                <select
+                                  value={googleFormImportMapping.village}
+                                  onChange={(e) => setGoogleFormImportMapping(prev => ({ ...prev, village: e.target.value }))}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
+                                >
+                                  <option value="">-- Skip / Choose Question --</option>
+                                  {googleFormQuestions.map((q) => (
+                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {/* Field 8: Caregiver */}
+                              <div className="space-y-1 bg-white border border-slate-200/50 p-2 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-705 block">Caregiver Name / Parent</label>
+                                <select
+                                  value={googleFormImportMapping.caregiver}
+                                  onChange={(e) => setGoogleFormImportMapping(prev => ({ ...prev, caregiver: e.target.value }))}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
+                                >
+                                  <option value="">-- Skip / Choose Question --</option>
+                                  {googleFormQuestions.map((q) => (
+                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {/* Field 9: Notes */}
+                              <div className="space-y-1 bg-white border border-slate-200/50 p-2 rounded-xl">
+                                <label className="text-[10px] font-bold text-slate-705 block">Registration Notes / Remarks</label>
+                                <select
+                                  value={googleFormImportMapping.notes}
+                                  onChange={(e) => setGoogleFormImportMapping(prev => ({ ...prev, notes: e.target.value }))}
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
+                                >
+                                  <option value="">-- Skip / Choose Question --</option>
+                                  {googleFormQuestions.map((q) => (
+                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+
+                            {/* Trigger Preview compiler button */}
+                            <div className="pt-3 border-t border-slate-200/60 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={applyGoogleFormMapping}
+                                className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] py-2 px-5 rounded-xl shadow-md transition-all cursor-pointer inline-flex items-center gap-1.5"
+                              >
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin-slow" />
+                                Generate & Preview Workspace Candidates ({googleFormResponses.length} Submissions)
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Live Candidate Preview Panel */}
+                {parsedImportList.length > 0 && (
+                  <div className="space-y-4">
+                    {/* Part 1: Interactive Header Mapping Selection Area */}
+                    {detectedHeadersList.length > 0 && (
+                      <div className="bg-gradient-to-br from-indigo-50/50 to-slate-50 border border-slate-200 rounded-xl p-4 space-y-3 animate-fadeIn">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200/60 pb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="p-1 px-1.5 bg-indigo-600 rounded-lg text-white font-sans text-[10px] font-bold">MAP</span>
+                            <div>
+                              <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide font-sans">
+                                CSV Smart Column Header Mapping
+                              </h4>
+                              <p className="text-[10px] text-slate-500 font-sans">
+                                Associate file columns with youth registration fields below
+                              </p>
+                            </div>
+                          </div>
+                          
+                          <button
+                            type="button"
+                            onClick={() => {
+                              // Reset to position-based fallback guess
+                              const maxC = detectedHeadersList.length;
+                              const defaultMap = {
+                                name: 0,
+                                idNo: maxC > 1 ? 1 : -1,
+                                age: maxC > 2 ? 2 : -1,
+                                gender: maxC > 3 ? 3 : -1,
+                                village: maxC > 4 ? 4 : -1,
+                                caregiver: maxC > 5 ? 5 : -1,
+                                cohort: maxC > 6 ? 6 : -1,
+                                contact: maxC > 7 ? 7 : -1,
+                                notes: maxC > 8 ? 8 : -1,
+                                schoolingStatus: maxC > 9 ? 9 : -1,
+                                schoolClass: maxC > 10 ? 10 : -1
+                              };
+                              setManualHeaderMapping(defaultMap);
+                              applyMappingOnRawRows(rawCSVRows, defaultMap);
+                            }}
+                            className="text-[10px] bg-white border border-slate-200 text-indigo-650 hover:bg-indigo-50 px-2 py-1 rounded-md font-bold transition-all cursor-pointer"
+                          >
+                            Reset to Default guess
+                          </button>
+                        </div>
+
+                        {/* Interactive Droppers Grid */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+                          {/* Name Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-700 block flex items-center gap-1">
+                              <span className="h-1.5 w-1.5 bg-red-500 rounded-full"></span>
+                              Participant Name *
+                            </label>
+                            <select
+                              value={manualHeaderMapping.name}
+                              onChange={(e) => updateHeaderMapping('name', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Ignore column (Not Valid) --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* National ID No Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block flex items-center gap-1">
+                              National ID No.
+                            </label>
+                            <select
+                              value={manualHeaderMapping.idNo}
+                              onChange={(e) => updateHeaderMapping('idNo', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Skip --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Age Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block">Estimated Age / Dob</label>
+                            <select
+                              value={manualHeaderMapping.age}
+                              onChange={(e) => updateHeaderMapping('age', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Skip --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Sex Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block">Gender / Sex</label>
+                            <select
+                              value={manualHeaderMapping.gender}
+                              onChange={(e) => updateHeaderMapping('gender', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Skip --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Village Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block">Home Village Address</label>
+                            <select
+                              value={manualHeaderMapping.village}
+                              onChange={(e) => updateHeaderMapping('village', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Skip --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Caregiver Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block">Primary Caregiver</label>
+                            <select
+                              value={manualHeaderMapping.caregiver}
+                              onChange={(e) => updateHeaderMapping('caregiver', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Skip --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Cohort Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block">Suggested Cohort / Class</label>
+                            <select
+                              value={manualHeaderMapping.cohort}
+                              onChange={(e) => updateHeaderMapping('cohort', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Fallback --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Contact Mobile Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block">Mobile Contact Phone</label>
+                            <select
+                              value={manualHeaderMapping.contact}
+                              onChange={(e) => updateHeaderMapping('contact', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Skip --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Intake Notes Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block">Intake Notes / Dietary</label>
+                            <select
+                              value={manualHeaderMapping.notes}
+                              onChange={(e) => updateHeaderMapping('notes', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Skip --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Schooling Status Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block">Schooling (Day/Boarder)</label>
+                            <select
+                              value={manualHeaderMapping.schoolingStatus}
+                              onChange={(e) => updateHeaderMapping('schoolingStatus', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Skip --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* School Class Map */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-705 block">Class / Grade Level</label>
+                            <select
+                              value={manualHeaderMapping.schoolClass}
+                              onChange={(e) => updateHeaderMapping('schoolClass', parseInt(e.target.value, 10))}
+                              className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-550"
+                            >
+                              <option value={-1}>-- Not Map / Skip --</option>
+                              {detectedHeadersList.map((head, hIdx) => (
+                                <option key={hIdx} value={hIdx}>{head} (Col {String.fromCharCode(65 + (hIdx % 26))})</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Part 1b: Horizontal spreadsheet cells preview grid */}
+                        {rawCSVRows.length > 0 && (
+                          <div className="space-y-1.5 mt-2 pt-2 border-t border-slate-200/50">
+                            <div className="flex items-center justify-between text-[10px]">
+                              <span className="font-semibold text-slate-700 font-mono tracking-tight flex items-center gap-1">
+                                <span className="h-1.5 w-1.5 bg-indigo-550 rounded-full"></span>
+                                Spreadsheet Cells Raw Grid Preview (First 4 Rows)
+                              </span>
+                              <span className="text-slate-400 font-sans font-mono text-[9px]">
+                                {rawCSVRows.length} rows inside file
+                              </span>
+                            </div>
+                            <div className="border border-slate-200 rounded-lg overflow-hidden overflow-x-auto shadow-3xs max-h-[140px] bg-white">
+                              <table className="w-full text-[10px] text-slate-650 font-mono border-collapse divide-y divide-slate-200">
+                                <thead className="bg-slate-50 sticky top-0 bg-opacity-95 z-20">
+                                  <tr className="divide-x divide-slate-150">
+                                    {detectedHeadersList.map((header, colIdx) => {
+                                      const isMapped = Object.values(manualHeaderMapping).includes(colIdx);
+                                      const mappedField = Object.entries(manualHeaderMapping).find(([_, cIdx]) => cIdx === colIdx)?.[0];
+                                      return (
+                                        <th key={colIdx} className={`p-1 text-center font-mono text-[9px] min-w-[130px] font-bold ${isMapped ? 'bg-indigo-50/70 text-indigo-750 border-b-2 border-b-indigo-500' : 'text-slate-400'}`}>
+                                          <div className="text-[8px] opacity-70">Col {String.fromCharCode(65 + (colIdx % 26))}</div>
+                                          <div className="truncate max-w-[150px]">{header}</div>
+                                          {isMapped && (
+                                            <span className="inline-block mt-0.5 px-1 py-0.2 bg-indigo-600 text-white font-sans text-[7px] leading-3 uppercase rounded font-extrabold tracking-tight">
+                                              {mappedField === 'idNo' ? 'ID NO' : mappedField?.toUpperCase()}
+                                            </span>
+                                          )}
+                                        </th>
+                                      );
+                                    })}
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-150">
+                                  {rawCSVRows.slice(0, 4).map((row, rIdx) => (
+                                    <tr key={rIdx} className="hover:bg-slate-50 divide-x divide-slate-100">
+                                      {row.map((cell, cIdx) => (
+                                        <td key={cIdx} className="p-1 px-2 text-center text-slate-700 truncate max-w-[150px] font-sans" title={cell}>
+                                          {cell || <span className="text-slate-350 italic text-[9px]">-</span>}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Part 2: Active Data Integrity Conflict Monitor / alerts dashboard */}
+                    {(() => {
+                      const idErrors = parsedImportList.filter(p => p.errors.some(e => e.includes('ID Number') || e.includes('Conflict'))).length;
+                      const nameWarnings = parsedImportList.filter(p => p.warnings && p.warnings.some(w => w.includes('Name'))).length;
+                      const contactWarnings = parsedImportList.filter(p => p.warnings && p.warnings.some(w => w.includes('Contact'))).length;
+                      const missingNameErrors = parsedImportList.filter(p => p.errors.includes('Missing Name')).length;
+
+                      if (idErrors === 0 && nameWarnings === 0 && contactWarnings === 0 && missingNameErrors === 0) return null;
+
+                      return (
+                        <div className="bg-rose-50/50 border border-rose-200 rounded-xl p-3 text-xs text-rose-950 space-y-1.5">
+                          <h5 className="font-bold flex items-center gap-1.5 text-rose-900">
+                            <span className="h-2 w-2 rounded-full bg-rose-500 animate-ping"></span>
+                            Data Integrity Warnings & Conflicts Identified
+                          </h5>
+                          <div className="flex flex-wrap gap-2 text-[10px] font-semibold text-slate-700 select-none">
+                            {idErrors > 0 && <span className="bg-red-100 border border-red-200 text-red-700 px-2 py-0.5 rounded-lg">🚨 {idErrors} Duplicate National ID Conflicts (Blocked)</span>}
+                            {missingNameErrors > 0 && <span className="bg-red-100 border border-red-200 text-red-700 px-2 py-0.5 rounded-lg">❌ {missingNameErrors} Missing Name Entries (Blocked)</span>}
+                            {nameWarnings > 0 && <span className="bg-amber-100 border border-amber-200 text-amber-700 px-2 py-0.5 rounded-lg">⚠️ {nameWarnings} Registered Students with Matching Names</span>}
+                            {contactWarnings > 0 && <span className="bg-amber-100 border border-amber-200 text-amber-700 px-2 py-0.5 rounded-lg">📱 {contactWarnings} Shared Contact Number Alerts</span>}
+                          </div>
+                          <p className="text-[9px] text-slate-500 font-medium">Any student record highlighting red ID conflicts cannot be checked for import unless mapping columns is resolved.</p>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Part 3: Render Candidates list */}
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider font-mono flex items-center gap-1.5">
+                          <span className="h-2 w-2 rounded-full bg-indigo-500"></span>
+                          Candidates Ready for Final Import Selection ({parsedImportList.length})
+                        </h4>
+                        
+                        {/* Global action summary label */}
+                        {(() => {
+                          const valids = parsedImportList.filter(p => p.isValid).length;
+                          const invalids = parsedImportList.length - valids;
+                          return (
+                            <span className="text-[10px] text-slate-500 font-medium font-sans">
+                              {valids} ready to import{invalids > 0 ? ` • ${invalids} errors to evaluate` : ''}
+                            </span>
+                          );
+                        })()}
+                      </div>
+
+                      {/* Header Columns details */}
+                      <div className="border border-slate-200 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto shadow-3xs">
+                        <table className="w-full text-left text-xs text-slate-700 border-collapse">
+                          <thead>
+                            <tr className="bg-slate-50 border-b border-slate-200 text-slate-400 font-mono text-[10px] uppercase font-bold sticky top-0 bg-opacity-95 z-20 backdrop-blur-xs">
+                              <th className="p-2.5 text-center w-10">
+                                <input 
+                                  type="checkbox"
+                                  checked={parsedImportList.length > 0 && parsedImportList.every(p => p.importChecked)}
+                                  onChange={() => {
+                                    const allChecked = parsedImportList.every(p => p.importChecked);
+                                    setParsedImportList(prev => prev.map(p => ({
+                                      ...p,
+                                      importChecked: p.isValid ? !allChecked : false
+                                    })));
+                                  }}
+                                  className="rounded text-indigo-600 focus:ring-indigo-400 cursor-pointer h-3.5 w-3.5"
+                                  title="Toggle all valid"
+                                />
+                              </th>
+                              <th className="p-2.5">Participant Candidate</th>
+                              <th className="p-2.5 w-36">Cohort Selection</th>
+                              <th className="p-2.5 text-right w-24">Integrity Status</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 bg-white">
+                            {parsedImportList.map((item, idx) => (
+                              <tr key={`${item.id}-${idx}`} className="hover:bg-slate-50/50">
+                                {/* Selection switch */}
+                                <td className="p-2.5 text-center">
+                                  <input 
+                                    type="checkbox"
+                                    disabled={!item.isValid}
+                                    checked={item.importChecked}
+                                    onChange={() => toggleCandidateCheck(item.id)}
+                                    className="rounded text-indigo-600 focus:ring-indigo-400 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed h-3.5 w-3.5"
+                                  />
+                                </td>
+                                {/* Identity */}
+                                <td className="p-2.5">
+                                  <div className="space-y-1">
+                                    <span className={`font-semibold block ${item.isValid ? 'text-slate-800' : 'text-slate-400 line-through'}`}>
+                                      {item.name || <em className="text-red-400 font-sans text-[11px]">Missing Name</em>}
+                                    </span>
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      {item.idNo && item.idNo !== '-' && (
+                                        <span className="text-[9px] font-mono font-bold text-slate-700 bg-slate-100 rounded px-1.5 py-0.2" title="ID Number">
+                                          {item.idNo}
+                                        </span>
+                                      )}
+                                      {(item.dob || item.age) && (item.dob ? calculateAgeFromDob(item.dob) : item.age) !== '-' && (
+                                        <span className="text-[9px] text-slate-500 font-sans" title="Age">
+                                          Age: {item.dob ? calculateAgeFromDob(item.dob) : item.age}
+                                        </span>
+                                      )}
+                                      {item.gender && item.gender !== '-' && (
+                                        <span className="text-[9px] text-pink-700 font-sans bg-pink-50 px-1.5 py-0.2 rounded" title="Gender">
+                                          Sex: {item.gender}
+                                        </span>
+                                      )}
+                                      {item.village && item.village !== '-' && (
+                                        <span className="text-[9px] text-indigo-700 font-sans bg-indigo-50 px-1 py-0.2/50 rounded" title="Village">
+                                          🏡 {item.village}
+                                        </span>
+                                      )}
+                                      {item.caregiver && item.caregiver !== '-' && (
+                                        <span className="text-[9px] text-slate-600 font-sans" title="Caregiver">
+                                          Caregiver: {item.caregiver}
+                                        </span>
+                                      )}
+                                      {item.schoolingStatus && item.schoolingStatus !== '-' && (
+                                        <span className="text-[9px] text-teal-700 bg-teal-50 px-1.5 py-0.2 rounded font-sans" title="Schooling">
+                                          School: {item.schoolingStatus}
+                                        </span>
+                                      )}
+                                      {item.schoolClass && item.schoolClass !== '-' && (
+                                        <span className="text-[9px] text-purple-700 bg-purple-50 px-1.5 py-0.2 rounded font-sans" title="Class">
+                                          Class: {item.schoolClass}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <span className="text-[9px] text-slate-400 font-mono block">
+                                      {item.contact}
+                                    </span>
+                                    
+                                    {/* Warnings list */}
+                                    {item.warnings && item.warnings.map((warn, wIdx) => (
+                                      <span key={wIdx} className="text-[9px] font-medium text-amber-700 bg-amber-50 rounded px-1.5 py-0.5 leading-tight block select-none max-w-lg mt-1 border border-amber-100">
+                                        ⚠️ {warn}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </td>
+                                {/* Cohort Select option */}
+                                <td className="p-2.5">
+                                  <select
+                                    value={item.cohort}
+                                    onChange={(e) => updateCandidateCohort(item.id, e.target.value)}
+                                    className="w-full bg-white border border-slate-200 rounded-lg p-1 text-[11px] font-medium text-slate-700 cursor-pointer focus:outline-none"
+                                  >
+                                    {COHORTS.filter(c => c !== 'All Cohorts').map(coh => (
+                                      <option key={coh} value={coh}>{coh}</option>
+                                    ))}
+                                  </select>
+                                </td>
+                                {/* Safety Indicator */}
+                                <td className="p-2.5 text-right font-mono">
+                                  {item.isValid ? (
+                                    <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-1.5 py-0.5 rounded uppercase font-mono border border-emerald-100">
+                                      Ready
+                                    </span>
+                                  ) : (
+                                    <div className="flex flex-col items-end gap-0.5" title={item.errors.join(', ')}>
+                                      <span className="text-[9px] text-rose-600 font-bold bg-rose-50 px-1 py-0.5 rounded uppercase font-mono max-w-[120px] truncate block border border-rose-100" title={item.errors.join(', ')}>
+                                        Conflict
+                                      </span>
+                                      <span className="text-[8px] text-red-500 font-sans block text-right mt-0.5" title={item.errors.join(', ')}>
+                                        {item.errors[0]}
+                                      </span>
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -10993,6 +16165,30 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Excel Template Downloader section for Attendance */}
+                <div className="bg-indigo-50/60 border border-indigo-150 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div className="flex gap-3 items-start">
+                    <div className="h-9 w-9 rounded-xl bg-indigo-100 flex items-center justify-center text-indigo-700 shrink-0">
+                      <FileSpreadsheet className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-800 font-sans">Download Attendance Excel / CSV Template</h4>
+                      <p className="text-[11px] text-slate-500 mt-0.5 leading-normal">
+                        Generate a pre-filled Excel spreadsheet loaded with your current active student roster:
+                        <strong className="text-indigo-800 font-semibold block mt-0.5">ID No., Student Name, Cohort, Status (Present/Absent)</strong>
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={downloadAttendanceTemplate}
+                    className="shrink-0 bg-indigo-600 hover:bg-indigo-750 text-white font-semibold text-xs py-2 px-3.5 rounded-xl shadow-xs transition-all cursor-pointer inline-flex items-center gap-1.5 focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download Roster Sheet (.csv)
+                  </button>
+                </div>
+
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 min-h-0">
                   {/* Left: Input Textarea and File Upload (7 cols) */}
                   <div className="lg:col-span-7 flex flex-col space-y-3">
@@ -11001,7 +16197,7 @@ export default function App() {
                         Pasted Attendance Roster text / CSV
                       </span>
                       <p className="text-[11px] text-slate-500 leading-normal font-sans mb-2">
-                        Paste a list of names, phone contacts, or ID numbers (one student per line) of people who actually attended this session. Unmatched active students are automatically marked as absent.
+                        Paste or drag-and-drop a spreadsheet. Supports structured Excel/CSV templates (with <code className="bg-slate-200 px-1 py-0.5 rounded font-mono text-indigo-750 font-bold">ID No., Student Name, Cohort, Status (Present/Absent)</code>) or simple loose barcode/name scanner rosters.
                       </p>
                     </div>
 
@@ -11056,32 +16252,72 @@ export default function App() {
                       <span className="text-rose-600 font-bold">Absent: {activeParticipants.length - attendanceMatchingDetails.matchedIds.size}</span>
                     </div>
 
+                    {/* Search Live Verification */}
+                    <div className="p-2 border-b border-slate-150 flex items-center gap-2 bg-slate-50/55">
+                      <div className="relative flex-1">
+                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="Filter live list by name or ID..."
+                          value={liveVerificationSearchQuery}
+                          onChange={(e) => setLiveVerificationSearchQuery(e.target.value)}
+                          className="w-full pl-7 pr-10 py-1 bg-white border border-slate-200 rounded-xl text-[10px] text-slate-700 placeholder:text-slate-450 focus:outline-none focus:border-slate-400 font-sans"
+                        />
+                        {liveVerificationSearchQuery && (
+                          <button 
+                            type="button"
+                            onClick={() => setLiveVerificationSearchQuery('')} 
+                            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[9px] bg-slate-150 hover:bg-slate-200 text-slate-600 rounded px-1"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
                     <div className="p-2 overflow-y-auto flex-1 divide-y divide-slate-100 max-h-[300px] lg:max-h-[340px]">
                       {activeParticipants.length === 0 ? (
                         <div className="p-6 text-center text-slate-400 text-xs">
                           No active participants registered.
                         </div>
                       ) : (
-                        activeParticipants.map(p => {
-                          const isMatched = attendanceMatchingDetails.matchedIds.has(p.id);
-                          return (
-                            <div key={`preview-att-${p.id}`} className="p-2 flex items-center justify-between gap-1 text-xs hover:bg-slate-50 transition-colors">
-                              <div className="min-w-0">
-                                <span className="font-bold text-slate-850 block truncate">{p.name}</span>
-                                <span className="text-[10px] text-slate-400 font-mono block">
-                                  ID: {p.idNo || p.id} • {p.cohort}
+                        (() => {
+                          const list = activeParticipants.filter(p => {
+                            if (!liveVerificationSearchQuery.trim()) return true;
+                            const q = liveVerificationSearchQuery.toLowerCase();
+                            return p.name.toLowerCase().includes(q) || 
+                              (p.idNo && p.idNo.toLowerCase().includes(q));
+                          });
+
+                          if (list.length === 0) {
+                            return (
+                              <div className="p-6 text-center text-slate-400 italic font-sans text-xs">
+                                No matching active students found for "{liveVerificationSearchQuery}"
+                              </div>
+                            );
+                          }
+
+                          return list.map((p, pIdx) => {
+                            const isMatched = attendanceMatchingDetails.matchedIds.has(p.id);
+                            return (
+                              <div key={`preview-att-${p.id}-${pIdx}`} className="p-2 flex items-center justify-between gap-1 text-xs hover:bg-slate-50 transition-colors">
+                                <div className="min-w-0">
+                                  <span className="font-bold text-slate-850 block truncate">{p.name}</span>
+                                  <span className="text-[10px] text-slate-400 font-mono block">
+                                    ID: {p.idNo || p.id} • {p.cohort}
+                                  </span>
+                                </div>
+                                <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full uppercase shrink-0 ${
+                                  isMatched 
+                                    ? "bg-emerald-50 text-emerald-700 border border-emerald-150 animate-pulse" 
+                                    : "bg-rose-50 text-rose-700 border border-rose-150"
+                                }`}>
+                                  {isMatched ? "PRESENT" : "ABSENT"}
                                 </span>
                               </div>
-                              <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full uppercase shrink-0 ${
-                                isMatched 
-                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-150 animate-pulse" 
-                                  : "bg-rose-50 text-rose-700 border border-rose-150"
-                              }`}>
-                                {isMatched ? "PRESENT" : "ABSENT"}
-                              </span>
-                            </div>
-                          );
-                        })
+                            );
+                          });
+                        })()
                       )}
                     </div>
                   </div>
@@ -11252,7 +16488,13 @@ export default function App() {
 
                   {/* Print / Save as PDF Button */}
                   <button
-                    onClick={() => window.print()}
+                    onClick={() => {
+                      try {
+                        window.print();
+                      } catch (err) {
+                        console.warn("Window printing not supported in iframe sandbox:", err);
+                      }
+                    }}
                     disabled={!monthlyReportData}
                     className="bg-emerald-600 hover:bg-emerald-750 text-white font-extrabold rounded-xl px-4 py-1.5 text-xs transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   >
@@ -11501,8 +16743,8 @@ export default function App() {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100 text-slate-700">
-                            {monthlyReportData.cohorts.map((cohort) => (
-                              <tr key={cohort.cohortName} className="hover:bg-slate-50/50 transition-colors">
+                            {monthlyReportData.cohorts.map((cohort, cIdx) => (
+                              <tr key={`${cohort.cohortName}-${cIdx}`} className="hover:bg-slate-50/50 transition-colors">
                                 <td className="py-3.5 px-4 font-bold text-slate-900">{cohort.cohortName}</td>
                                 <td className="py-3.5 px-4 font-mono font-semibold">{cohort.membersCount} students</td>
                                 <td className="py-3.5 px-4 font-mono font-semibold">{cohort.totalSessionsPossible} entries</td>
@@ -11553,8 +16795,8 @@ export default function App() {
                       </div>
 
                       <div className="space-y-8 flex flex-col">
-                        {monthlyReportData.cohorts.map((cohort) => (
-                          <div key={`ledger-${cohort.cohortName}`} className="space-y-2.5 flex flex-col">
+                        {monthlyReportData.cohorts.map((cohort, cIdx) => (
+                          <div key={`ledger-${cohort.cohortName}-${cIdx}`} className="space-y-2.5 flex flex-col">
                             <div className="flex items-center gap-2">
                               <span className="h-2 w-2 rounded-full bg-slate-800"></span>
                               <h4 className="text-xs font-black text-slate-900 tracking-tight">{cohort.cohortName} - Student Dossier Log ({cohort.students.length})</h4>
@@ -11580,8 +16822,8 @@ export default function App() {
                                     </tr>
                                   </thead>
                                   <tbody className="divide-y divide-slate-100 text-slate-700">
-                                    {cohort.students.map((stRow) => (
-                                      <tr key={stRow.participant.id} className="hover:bg-slate-50/30 transition-colors">
+                                    {cohort.students.map((stRow, stRowIdx) => (
+                                      <tr key={`${stRow.participant.id}-${stRowIdx}`} className="hover:bg-slate-50/30 transition-colors">
                                         <td className="py-2 px-3 font-bold text-slate-800">{stRow.participant.name}</td>
                                         <td className="py-1.5 px-3 font-mono text-slate-500">{stRow.participant.idNo || 'N/A'}</td>
                                         <td className="py-1.5 px-3 text-slate-550">

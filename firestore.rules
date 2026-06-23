@@ -24,12 +24,17 @@ service cloud.firestore {
 
     function isValidUserDbState(data) {
       return data.keys().hasAll(['participants', 'sessions', 'attendance', 'lastUpdated'])
-        && data.keys().size() == 4
+        && data.keys().size() <= 9
         && data.participants is list
         && data.sessions is list
         && data.attendance is map
         && data.lastUpdated is string
-        && data.lastUpdated.size() <= 128;
+        && data.lastUpdated.size() <= 128
+        && (data.get('emailedSessionDates', []) is list)
+        && (data.get('dismissedEmailDates', []) is list)
+        && (data.get('lastEmailedSessionDate', null) == null || data.get('lastEmailedSessionDate', null) is string)
+        && (data.get('staffEmailRecipient', null) == null || data.get('staffEmailRecipient', null) is string)
+        && (data.get('isAutomaticEmailEnabled', true) == null || data.get('isAutomaticEmailEnabled', true) is bool);
     }
 
     // Secure user-specific sub-paths for participants state cache syncing
