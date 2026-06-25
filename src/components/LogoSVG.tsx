@@ -68,6 +68,65 @@ export const getLogoBase64DataUri = () => {
   return 'data:image/svg+xml;utf8,' + encodeURIComponent(LOGO_SVG_RAW);
 };
 
+// High-fidelity PNG rendering cache for PDF exports
+let cachedPngUri: string | null = null;
+const WHITE_PNG_FALLBACK = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAoMBgDTD2qgAAAAASUVORK5CYII=";
+
+export const getLogoPngDataUri = (): string => {
+  return cachedPngUri || WHITE_PNG_FALLBACK;
+};
+
+export const preloadLogoPng = (): Promise<string> => {
+  if (cachedPngUri) return Promise.resolve(cachedPngUri);
+  return new Promise((resolve) => {
+    try {
+      if (typeof window === 'undefined' || typeof Image === 'undefined') {
+        resolve(WHITE_PNG_FALLBACK);
+        return;
+      }
+      const img = new Image();
+      const svgBlob = new Blob([LOGO_SVG_RAW], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 150;
+          canvas.height = 150;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, 150, 150);
+            ctx.drawImage(img, 0, 0, 150, 150);
+            cachedPngUri = canvas.toDataURL('image/png');
+            URL.revokeObjectURL(url);
+            resolve(cachedPngUri);
+          } else {
+            URL.revokeObjectURL(url);
+            resolve(WHITE_PNG_FALLBACK);
+          }
+        } catch (err) {
+          URL.revokeObjectURL(url);
+          resolve(WHITE_PNG_FALLBACK);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(WHITE_PNG_FALLBACK);
+      };
+      img.src = url;
+    } catch (e) {
+      resolve(WHITE_PNG_FALLBACK);
+    }
+  });
+};
+
+// Auto-preload on startup in browser
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    preloadLogoPng().catch(() => {});
+  }, 100);
+}
+
 interface LogoSVGProps extends React.SVGProps<SVGSVGElement> {}
 
 export const LogoSVG: React.FC<LogoSVGProps> = (props) => {

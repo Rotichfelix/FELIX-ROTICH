@@ -1,5 +1,5 @@
 import { jsPDF } from 'jspdf';
-import { getLogoBase64DataUri } from '../components/LogoSVG';
+import { getLogoPngDataUri } from '../components/LogoSVG';
 
 interface PageNumState {
   current: number;
@@ -41,8 +41,8 @@ function addOfficialHeader(doc: jsPDF, title: string, participantName?: string) 
   
   // Add the Logo on the left of the header
   try {
-    const logoUri = getLogoBase64DataUri();
-    doc.addImage(logoUri, 'SVG', 22, 11, 15, 15);
+    const logoUri = getLogoPngDataUri();
+    doc.addImage(logoUri, 'PNG', 22, 11, 15, 15);
   } catch (error) {
     console.error("Failed to add SVG logo to form PDF:", error);
   }

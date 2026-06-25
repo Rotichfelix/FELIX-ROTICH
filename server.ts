@@ -94,7 +94,9 @@ async function startServer() {
         dismissedEmailDates: metadata.dismissedEmailDates || [],
         lastEmailedSessionDate: metadata.lastEmailedSessionDate || "",
         staffEmailRecipient: metadata.staffEmailRecipient || "",
-        isAutomaticEmailEnabled: metadata.isAutomaticEmailEnabled || false
+        isAutomaticEmailEnabled: metadata.isAutomaticEmailEnabled || false,
+        staffTasks: metadata.staffTasks || [],
+        complianceStatus: metadata.complianceStatus || null
       });
     } catch (error: any) {
       console.error("Failed to read database records from Cloud SQL:", error);
@@ -117,7 +119,9 @@ async function startServer() {
         dismissedEmailDates,
         lastEmailedSessionDate,
         staffEmailRecipient,
-        isAutomaticEmailEnabled
+        isAutomaticEmailEnabled,
+        staffTasks,
+        complianceStatus
       } = req.body;
 
       // 1. Get or create user in DB
@@ -131,7 +135,9 @@ async function startServer() {
             dismissedEmailDates: dismissedEmailDates || [],
             lastEmailedSessionDate: lastEmailedSessionDate || "",
             staffEmailRecipient: staffEmailRecipient || "",
-            isAutomaticEmailEnabled: !!isAutomaticEmailEnabled
+            isAutomaticEmailEnabled: !!isAutomaticEmailEnabled,
+            staffTasks: staffTasks || [],
+            complianceStatus: complianceStatus || null
           }
         })
         .where(eq(users.id, dbUser.id));

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, FormEvent, ChangeEvent, DragEvent, useMemo
 import { AnimatePresence, motion } from 'motion/react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, Legend, LineChart, Line } from 'recharts';
 import { 
+  Activity,
   MessageSquare,
   UserPlus, 
   Calendar, 
@@ -15,6 +16,7 @@ import {
   XCircle, 
   MinusCircle, 
   HelpCircle, 
+  LayoutGrid, 
   X, 
   Copy, 
   Check, 
@@ -45,12 +47,13 @@ import {
   ArrowDown,
   ArrowUpDown,
   Printer,
+  Receipt,
   Sparkles,
   Brain,
   Bell
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
-import { getLogoBase64DataUri, LogoSVG } from './components/LogoSVG';
+import { getLogoBase64DataUri, getLogoPngDataUri, LogoSVG } from './components/LogoSVG';
 import { db, auth, googleProvider, storage } from './firebase';
 import { onAuthStateChanged, signInWithPopup, signOut, User, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, GoogleAuthProvider, sendEmailVerification } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
@@ -83,7 +86,9 @@ import {
 } from './utils';
 import { FormModal } from './components/FormModal';
 import { generateFormPDF } from './utils/formPdf';
+import { generateBudgetPDF } from './utils/budgetPdf';
 import { SessionInspectorModal } from './components/SessionInspectorModal';
+import { CdoStaffPortals } from './components/CdoStaffPortals';
 
 /**
  * Flags if a participant is due for caregiver outreach based on the rule:
@@ -181,14 +186,23 @@ export default function App() {
   });
 
   const [sessions, setSessions] = useState<Session[]>(() => {
-    const local = localStorage.getItem('attendance_tracker_sessions');
-    const parsed: Session[] = local ? JSON.parse(local) : INITIAL_SESSIONS;
-    const seen = new Set<string>();
-    return parsed.filter(s => {
-      if (!s.date || seen.has(s.date)) return false;
-      seen.add(s.date);
-      return true;
-    });
+    try {
+      const local = localStorage.getItem('attendance_tracker_sessions');
+      if (local) {
+        const parsed = JSON.parse(local);
+        if (Array.isArray(parsed)) {
+          const seen = new Set<string>();
+          return parsed.filter(s => {
+            if (!s || !s.date || seen.has(s.date)) return false;
+            seen.add(s.date);
+            return true;
+          });
+        }
+      }
+    } catch (e) {
+      console.error("Failed to parse sessions from localStorage:", e);
+    }
+    return INITIAL_SESSIONS;
   });
 
   const [attendance, setAttendance] = useState<AttendanceRecord>(() => {
@@ -223,7 +237,103 @@ export default function App() {
   const [filterYearType, setFilterYearType] = useState<'join' | 'dob'>('join');
   const [filterAgeStart, setFilterAgeStart] = useState<string>('');
   const [filterAgeEnd, setFilterAgeEnd] = useState<string>('');
-  const [currentTab, setCurrentTab] = useState<'tracker' | 'journal' | 'admin' | 'ai-analyst'>('tracker');
+  const [currentTab, setCurrentTab] = useState<'tracker' | 'journal' | 'admin' | 'ai-analyst' | 'staff-portals' | 'roster-gallery'>('tracker');
+  const [gallerySelectedSessionDate, setGallerySelectedSessionDate] = useState<string>('');
+  const [gallerySearchQuery, setGallerySearchQuery] = useState('');
+  const [gallerySelectedCohort, setGallerySelectedCohort] = useState('All Cohorts');
+  const [gallerySelectedVillage, setGallerySelectedVillage] = useState('All Villages');
+  const [galleryStatusFilter, setGalleryStatusFilter] = useState<'all' | AttendanceStatus>('all');
+  const [staffTasks, setStaffTasks] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_staff_tasks');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.error("Failed to load staff tasks:", e);
+    }
+    return [
+      {
+        id: 'task_default_0',
+        title: 'Conduct Immunization Verification Round',
+        assignedRole: 'CDO HEALTH',
+        priority: 'high',
+        status: 'pending',
+        dueDate: new Date(Date.now() + 86400000 * 3).toISOString().split('T')[0],
+        description: 'Verify and register all incoming vaccination files for children in Cohorts A & B.'
+      },
+      {
+        id: 'task_default_1',
+        title: 'Sponsor Letter Intake Session',
+        assignedRole: 'CDO SDR',
+        priority: 'medium',
+        status: 'in-progress',
+        dueDate: new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0],
+        description: 'Host the physical child-to-sponsor writing session for active sponsor codes.'
+      }
+    ];
+  });
+
+  const [complianceStatus, setComplianceStatus] = useState<any>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_compliance_status');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error(e);
+    }
+    return {
+      childProtectionSigned: true,
+      healthComplianceMet: true,
+      financialAuditingApproved: false,
+      staffCertificationsUpdated: true
+    };
+  });
+
+  const [budgets, setBudgets] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_budgets');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.error("Failed to load budgets:", e);
+    }
+    return [
+      {
+        id: 'BGT-2026-001',
+        title: 'Emergency Medical Camp Supplies',
+        category: 'Health',
+        amount: 450000,
+        description: 'Procurement of basic medical supplies, first aid kits, and child multi-vitamins for the upcoming community healthcare outreach day.',
+        submittedBy: 'CDO HEALTH',
+        submittedAt: '2026-06-20',
+        status: 'Approved',
+        items: [
+          { name: 'Multi-vitamins (100 pack)', qty: 5, unitCost: 30000 },
+          { name: 'First Aid Kit Refills', qty: 10, unitCost: 15000 },
+          { name: 'Paracetamol Tablets', qty: 50, unitCost: 3000 }
+        ]
+      },
+      {
+        id: 'BGT-2026-002',
+        title: 'Sponsor Appreciation Letters & Stationery',
+        category: 'Sponsor Relations',
+        amount: 120000,
+        description: 'Buying letterhead envelopes, custom drawing crayons, and hard boards for the children to write physical letters to their international sponsors.',
+        submittedBy: 'CDO SDR',
+        submittedAt: '2026-06-22',
+        status: 'Pending',
+        items: [
+          { name: 'Custom drawing pads', qty: 50, unitCost: 1000 },
+          { name: 'Colored pencils (12-pack)', qty: 20, unitCost: 2000 },
+          { name: 'Envelopes (box of 500)', qty: 1, unitCost: 30000 }
+        ]
+      }
+    ];
+  });
+
   const [aiReportLoading, setAiReportLoading] = useState(false);
   const [activeStatsTab, setActiveStatsTab] = useState<'cohorts' | 'villages' | 'genders' | 'schooling'>('cohorts');
   const [aiCohortReport, setAiCohortReport] = useState<{
@@ -301,6 +411,11 @@ export default function App() {
   const [isSyncingToSheets, setIsSyncingToSheets] = useState(false);
   const [syncedSpreadsheetUrl, setSyncedSpreadsheetUrl] = useState<string | null>(null);
   const [sheetSyncError, setSheetSyncError] = useState<string | null>(null);
+
+  // Google Calendar sync state variables
+  const [isSyncingToCalendar, setIsSyncingToCalendar] = useState(false);
+  const [calendarSyncSuccess, setCalendarSyncSuccess] = useState<string | null>(null);
+  const [calendarSyncError, setCalendarSyncError] = useState<string | null>(null);
   const [staffEmailRecipient, setStaffEmailRecipient] = useState<string>(() => {
     return localStorage.getItem('attendance_tracker_staff_email_recipient') || 'lomuriangolecydc@gmail.com';
   });
@@ -888,6 +1003,10 @@ export default function App() {
     const activeSessionsList = customData?.sessions || sessions;
     const activeAttendanceRecord = customData?.attendance || attendance;
 
+    // Save locally
+    localStorage.setItem('attendance_tracker_staff_tasks', JSON.stringify(staffTasks));
+    localStorage.setItem('attendance_tracker_compliance_status', JSON.stringify(complianceStatus));
+
     const dataToSync = {
       participants: activeParticipantsList,
       sessions: activeSessionsList,
@@ -897,6 +1016,8 @@ export default function App() {
       lastEmailedSessionDate,
       staffEmailRecipient,
       isAutomaticEmailEnabled,
+      staffTasks,
+      complianceStatus,
       lastUpdated: new Date().toISOString()
     };
 
@@ -992,6 +1113,15 @@ export default function App() {
           if (typeof data.isAutomaticEmailEnabled === 'boolean') {
             setIsAutomaticEmailEnabled(data.isAutomaticEmailEnabled);
             localStorage.setItem('attendance_tracker_auto_email_enabled', String(data.isAutomaticEmailEnabled));
+          }
+
+          if (Array.isArray(data.staffTasks)) {
+            setStaffTasks(data.staffTasks);
+            localStorage.setItem('attendance_tracker_staff_tasks', JSON.stringify(data.staffTasks));
+          }
+          if (data.complianceStatus) {
+            setComplianceStatus(data.complianceStatus);
+            localStorage.setItem('attendance_tracker_compliance_status', JSON.stringify(data.complianceStatus));
           }
 
           // Save pulled values to local cache
@@ -1590,6 +1720,10 @@ export default function App() {
     localStorage.setItem('attendance_tracker_records', JSON.stringify(attendance));
   }, [attendance]);
 
+  useEffect(() => {
+    localStorage.setItem('attendance_tracker_budgets', JSON.stringify(budgets));
+  }, [budgets]);
+
   // Monitor tab closing, user exits, or navigates away for automated JSON backup
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1819,6 +1953,70 @@ export default function App() {
       setSelectedMonthlyReportMonth(uniqueMonths[0]);
     }
   }, [uniqueMonths, selectedMonthlyReportMonth]);
+
+  useEffect(() => {
+    if (sessions && sessions.length > 0 && !gallerySelectedSessionDate) {
+      setGallerySelectedSessionDate(sessions[sessions.length - 1].date);
+    }
+  }, [sessions, gallerySelectedSessionDate]);
+
+  const galleryFilteredParticipants = useMemo(() => {
+    return activeParticipants.filter(p => {
+      // 1. Search Query
+      if (gallerySearchQuery.trim()) {
+        const query = gallerySearchQuery.toLowerCase();
+        const matchesName = p.name.toLowerCase().includes(query);
+        const matchesId = p.idNo && p.idNo.toLowerCase().includes(query);
+        const matchesCode = p.id && p.id.toLowerCase().includes(query);
+        if (!matchesName && !matchesId && !matchesCode) {
+          return false;
+        }
+      }
+
+      // 2. Cohort Filter
+      if (gallerySelectedCohort !== 'All Cohorts') {
+        if (p.cohort !== gallerySelectedCohort) {
+          return false;
+        }
+      }
+
+      // 3. Village Filter
+      if (gallerySelectedVillage !== 'All Villages') {
+        if (!p.village || p.village.trim().toLowerCase() !== gallerySelectedVillage.trim().toLowerCase()) {
+          return false;
+        }
+      }
+
+      // 4. Status Filter
+      if (galleryStatusFilter !== 'all') {
+        const sessionDate = gallerySelectedSessionDate || (sessions[sessions.length - 1]?.date || '');
+        const currentStatus = (attendance[p.id] && attendance[p.id][sessionDate]) || 'unmarked';
+        if (currentStatus !== galleryStatusFilter) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [activeParticipants, gallerySearchQuery, gallerySelectedCohort, gallerySelectedVillage, galleryStatusFilter, gallerySelectedSessionDate, attendance, sessions]);
+
+  const galleryStatsForSelectedSession = useMemo(() => {
+    const sessionDate = gallerySelectedSessionDate || (sessions[sessions.length - 1]?.date || '');
+    let present = 0;
+    let absent = 0;
+    let excused = 0;
+    let unmarked = 0;
+
+    activeParticipants.forEach(p => {
+      const status = (attendance[p.id] && attendance[p.id][sessionDate]) || 'unmarked';
+      if (status === 'present') present++;
+      else if (status === 'absent') absent++;
+      else if (status === 'excused') excused++;
+      else unmarked++;
+    });
+
+    return { present, absent, excused, unmarked, total: activeParticipants.length };
+  }, [activeParticipants, gallerySelectedSessionDate, attendance, sessions]);
 
   const monthlyReportData = (() => {
     let sessionsInPeriod;
@@ -3983,7 +4181,7 @@ export default function App() {
     // ---- OFFICIAL HIGH-FIDELITY HEADER BLOCK (COPIED EXACTLY FROM USER'S FORMAT) ----
     // Add the Logo on the left of the header
     try {
-      doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+      doc.addImage(getLogoPngDataUri(), 'PNG', 22, 11, 15, 15);
     } catch (e) {
       console.error("Failed to add logo:", e);
     }
@@ -4811,7 +5009,7 @@ export default function App() {
     const drawHeader = (pageNumber: number) => {
       // Add the Logo on the left of the header
       try {
-        doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+        doc.addImage(getLogoPngDataUri(), 'PNG', 22, 11, 15, 15);
       } catch (e) {
         console.error("Failed to add logo:", e);
       }
@@ -5345,7 +5543,7 @@ export default function App() {
     // ---- OFFICIAL HIGH-FIDELITY HEADER BLOCK (COPIED EXACTLY FROM USER'S FORMAT) ----
     // Add the Logo on the left of the header
     try {
-      doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+      doc.addImage(getLogoPngDataUri(), 'PNG', 22, 11, 15, 15);
     } catch (e) {
       console.error("Failed to add logo:", e);
     }
@@ -5630,7 +5828,7 @@ export default function App() {
     const drawHeader = (page: number) => {
       // Add the Logo on the left of the header
       try {
-        doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+        doc.addImage(getLogoPngDataUri(), 'PNG', 22, 11, 15, 15);
       } catch (e) {
         console.error("Failed to add logo:", e);
       }
@@ -6159,7 +6357,7 @@ export default function App() {
     const drawHeader = (page: number) => {
       // Add the Logo on the left of the header
       try {
-        doc.addImage(getLogoBase64DataUri(), 'SVG', 22, 11, 15, 15);
+        doc.addImage(getLogoPngDataUri(), 'PNG', 22, 11, 15, 15);
       } catch (e) {
         console.error("Failed to add logo:", e);
       }
@@ -6540,6 +6738,191 @@ export default function App() {
     }
  
     doc.save(`Lomuriangole_CYDC_Cohort_AI_Report_${new Date().toISOString().split('T')[0]}.pdf`);
+  };
+
+  const syncSessionToCalendar = async (session: Session) => {
+    // Consent dialogue for mutating actions
+    const isConfirmed = window.confirm(
+      `Synchronize session date [${session.date} - ${session.label || 'Regular Session'}] directly to the dedicated 'CYDC Lomuriangole' Google Calendar?\n\nThis will configure/create the calendar if it does not exist, and will insert or update the session event.`
+    );
+    if (!isConfirmed) return;
+
+    setIsSyncingToCalendar(true);
+    setCalendarSyncError(null);
+    setCalendarSyncSuccess(null);
+
+    try {
+      let activeToken = googleAccessToken;
+
+      // Lazy load OAuth if accessToken isn't stored in app state
+      if (!activeToken) {
+        try {
+          const result = await signInWithPopup(auth, googleProvider);
+          const credential = GoogleAuthProvider.credentialFromResult(result);
+          if (credential?.accessToken) {
+            activeToken = credential.accessToken;
+            setGoogleAccessToken(activeToken);
+          } else {
+            throw new Error("Failed to retrieve Google Calendar Access Token from login credential. Please try again.");
+          }
+        } catch (authErr: any) {
+          throw new Error(`Google Authentication failed: ${authErr?.message || authErr}`);
+        }
+      }
+
+      // 1. Get or create the dedicated 'CYDC Lomuriangole' Calendar
+      const listRes = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList', {
+        headers: { Authorization: `Bearer ${activeToken}` }
+      });
+      if (!listRes.ok) {
+        throw new Error(`Failed to list calendars: ${listRes.statusText}`);
+      }
+      const listData = await listRes.json();
+      let calendarId = null;
+      if (listData.items) {
+        const targetCal = listData.items.find((c: any) => c.summary === 'CYDC Lomuriangole');
+        if (targetCal) {
+          calendarId = targetCal.id;
+        }
+      }
+
+      if (!calendarId) {
+        const createCalRes = await fetch('https://www.googleapis.com/calendar/v3/calendars', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${activeToken}`
+          },
+          body: JSON.stringify({
+            summary: 'CYDC Lomuriangole',
+            description: 'Dedicated program tracking calendar for the Lomuriangole Child & Youth Development Center (UG 1083).'
+          })
+        });
+        if (!createCalRes.ok) {
+          throw new Error(`Failed to create CYDC Lomuriangole calendar: ${createCalRes.statusText}`);
+        }
+        const createdCal = await createCalRes.json();
+        calendarId = createdCal.id;
+      }
+
+      // Calculate attendance statistics of the session
+      let present = 0;
+      let absent = 0;
+      let excused = 0;
+      activeParticipants.forEach(p => {
+        const status = attendance[p.id]?.[session.date];
+        if (status === 'present') present++;
+        if (status === 'absent') absent++;
+        if (status === 'excused') excused++;
+      });
+      const total = present + absent + excused;
+      const rate = total > 0 ? Math.round((present / total) * 100) : 0;
+
+      // Construct detailed description text
+      const checklistText = Object.entries(session.checklist || {})
+        .map(([task, checked]) => `${checked ? '✅' : '⬜'} ${task}`)
+        .join('\n') || 'No checklist activities logged for this session.';
+
+      const notesText = session.notes || 'No notes compiled for this session.';
+
+      const descriptionText = `📋 CYDC Lomuriangole Program Session Report File
+Date: ${session.date}
+Session Type/Label: ${session.label || 'Regular Session'}
+
+📊 Attendance Statistics Summary:
+- Total Participants: ${total}
+- Presence Rate: ${rate}%
+- Present: ${present}
+- Absent: ${absent}
+- Excused: ${excused}
+
+✅ Required Activities Checklist:
+${checklistText}
+
+📝 Session Report Notes:
+${notesText}
+
+---
+Generated and synchronized securely via CYDC Lomuriangole Case Management Engine.
+UG 1083 Child Development Office All Rights Reserved.`;
+
+      // Helper to compute end date (exclusive) securely
+      const getNextDay = (dateStr: string) => {
+        const parts = dateStr.split('-');
+        if (parts.length === 3) {
+          const year = parseInt(parts[0], 10);
+          const month = parseInt(parts[1], 10) - 1;
+          const day = parseInt(parts[2], 10);
+          const d = new Date(year, month, day);
+          d.setDate(d.getDate() + 1);
+          const yyyy = d.getFullYear();
+          const mm = String(d.getMonth() + 1).padStart(2, '0');
+          const dd = String(d.getDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        }
+        return dateStr;
+      };
+
+      const eventBody = {
+        summary: `Lomuriangole CYDC: ${session.label || 'Regular Session'}`,
+        description: descriptionText,
+        colorId: "9", // Beautiful blueberry color accent
+        start: { date: session.date },
+        end: { date: getNextDay(session.date) }
+      };
+
+      // 2. See if event already exists on that date
+      const minTime = `${session.date}T00:00:00Z`;
+      const maxTime = `${session.date}T23:59:59Z`;
+      const eventsRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?timeMin=${minTime}&timeMax=${maxTime}`, {
+        headers: { Authorization: `Bearer ${activeToken}` }
+      });
+
+      let existingEventId = null;
+      if (eventsRes.ok) {
+        const eventsData = await eventsRes.json();
+        const found = eventsData.items?.find((item: any) => item.summary?.includes('Lomuriangole CYDC') || item.start?.date === session.date);
+        if (found) {
+          existingEventId = found.id;
+        }
+      }
+
+      if (existingEventId) {
+        // Update existing calendar event
+        const updateRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${existingEventId}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${activeToken}`
+          },
+          body: JSON.stringify(eventBody)
+        });
+        if (!updateRes.ok) {
+          throw new Error(`Failed to update calendar event: ${updateRes.statusText}`);
+        }
+      } else {
+        // Create brand new calendar event
+        const createEventRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${activeToken}`
+          },
+          body: JSON.stringify(eventBody)
+        });
+        if (!createEventRes.ok) {
+          throw new Error(`Failed to create calendar event: ${createEventRes.statusText}`);
+        }
+      }
+
+      setCalendarSyncSuccess(`Successfully synchronized session on ${session.date} to 'CYDC Lomuriangole' Google Calendar!`);
+      logSystemAction('audit', 'Calendar Saved/Synced', `Synchronized program session date "${session.date}" directly to 'CYDC Lomuriangole' Google Calendar.`);
+    } catch (err: any) {
+      console.error("Google Calendar sync error:", err);
+      setCalendarSyncError(err.message || 'Unknown calendar sync error');
+    } finally {
+      setIsSyncingToCalendar(false);
+    }
   };
 
   const syncMonthlyReportToGoogleSheets = async () => {
@@ -7817,6 +8200,17 @@ export default function App() {
                 Active Student Board
               </button>
               <button
+                onClick={() => setCurrentTab('roster-gallery')}
+                className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
+                  currentTab === 'roster-gallery'
+                    ? 'border-slate-900 text-slate-900 font-bold'
+                    : 'border-transparent text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                <LayoutGrid className="w-4 h-4 text-indigo-500" />
+                Roster Gallery
+              </button>
+              <button
                 onClick={() => setCurrentTab('journal')}
                 className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
                   currentTab === 'journal'
@@ -7837,6 +8231,17 @@ export default function App() {
               >
                 <Sparkles className="w-4 h-4 text-indigo-600 animate-pulse" />
                 AI Roster Analyst
+              </button>
+              <button
+                onClick={() => setCurrentTab('staff-portals')}
+                className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
+                  currentTab === 'staff-portals'
+                    ? 'border-slate-900 text-slate-900 font-bold'
+                    : 'border-transparent text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                <Activity className="w-4 h-4 text-rose-500 animate-pulse" />
+                Staff Portals
               </button>
               <button
                 onClick={() => setCurrentTab('admin')}
@@ -9921,6 +10326,331 @@ export default function App() {
           </>
         )}
 
+        {currentTab === 'roster-gallery' && (
+          <div className="space-y-6 animate-fade-in font-sans">
+            {/* Header section with admin mode status */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900 text-white rounded-3xl p-6 shadow-md relative overflow-hidden">
+              <div className="absolute top-0 right-0 h-32 w-32 bg-indigo-500/10 rounded-full blur-2xl -mr-8 -mt-8"></div>
+              <div className="relative z-10">
+                <h2 className="text-xl sm:text-2xl font-bold tracking-tight flex items-center gap-2">
+                  <LayoutGrid className="w-6 h-6 text-indigo-400" />
+                  Roster Gallery
+                </h2>
+                <p className="text-xs sm:text-sm text-slate-300 mt-1">
+                  Grid-based visual check-in dashboard with real-time student profiles and direct check-in actions.
+                </p>
+              </div>
+
+              {/* Status Shield */}
+              <div className="relative z-10 flex flex-wrap items-center gap-3">
+                {isAdminMode ? (
+                  <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-2xl px-4 py-2 flex items-center gap-2 text-xs font-semibold">
+                    <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    🔓 Admin Edit Mode: Unlocked
+                  </div>
+                ) : (
+                  <div className="bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-2xl px-4 py-2 flex items-center gap-2 text-xs font-semibold">
+                    <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse"></span>
+                    🔒 Admin Edit Lock: Locked (Read-Only)
+                  </div>
+                )}
+                
+                {/* Session select dropdown */}
+                <div className="flex items-center gap-2 bg-slate-800 border border-slate-700 rounded-2xl px-3 py-1.5 text-xs">
+                  <span className="text-slate-400 font-medium">Session:</span>
+                  <select
+                    value={gallerySelectedSessionDate}
+                    onChange={(e) => setGallerySelectedSessionDate(e.target.value)}
+                    className="bg-transparent font-bold text-white border-none outline-none focus:ring-0 cursor-pointer text-xs"
+                  >
+                    {sessions.map((s) => (
+                      <option key={s.date} value={s.date} className="bg-slate-800 text-white">
+                        {formatToShortDayMonth(s.date)} {s.label ? `(${s.label})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Quick Session Stats Bar */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-3xs">
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex flex-col justify-center">
+                <span className="text-[10px] uppercase font-bold text-slate-400 font-mono">Session Target</span>
+                <span className="text-lg font-extrabold text-slate-800 mt-1">
+                  {galleryStatsForSelectedSession.total} <span className="text-xs font-normal text-slate-400">students</span>
+                </span>
+              </div>
+              
+              <div className="p-3 bg-emerald-50/45 rounded-xl border border-emerald-100/65 flex flex-col justify-center">
+                <span className="text-[10px] uppercase font-bold text-emerald-600 font-mono flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Present
+                </span>
+                <span className="text-lg font-extrabold text-emerald-800 mt-1">
+                  {galleryStatsForSelectedSession.present}
+                  <span className="text-xs font-normal text-emerald-500 ml-1.5">
+                    ({galleryStatsForSelectedSession.total > 0 ? Math.round((galleryStatsForSelectedSession.present / galleryStatsForSelectedSession.total) * 100) : 0}%)
+                  </span>
+                </span>
+              </div>
+
+              <div className="p-3 bg-rose-50/45 rounded-xl border border-rose-100/65 flex flex-col justify-center">
+                <span className="text-[10px] uppercase font-bold text-rose-500/90 font-mono flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-rose-450"></span> Absent
+                </span>
+                <span className="text-lg font-extrabold text-rose-800 mt-1">
+                  {galleryStatsForSelectedSession.absent}
+                  <span className="text-xs font-normal text-rose-400 ml-1.5">
+                    ({galleryStatsForSelectedSession.total > 0 ? Math.round((galleryStatsForSelectedSession.absent / galleryStatsForSelectedSession.total) * 100) : 0}%)
+                  </span>
+                </span>
+              </div>
+
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-150 flex flex-col justify-center">
+                <span className="text-[10px] uppercase font-bold text-slate-500 font-mono flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-slate-400"></span> Excused
+                </span>
+                <span className="text-lg font-extrabold text-slate-700 mt-1">
+                  {galleryStatsForSelectedSession.excused}
+                  <span className="text-xs font-normal text-slate-400 ml-1.5">
+                    ({galleryStatsForSelectedSession.total > 0 ? Math.round((galleryStatsForSelectedSession.excused / galleryStatsForSelectedSession.total) * 100) : 0}%)
+                  </span>
+                </span>
+              </div>
+
+              <div className="col-span-2 sm:col-span-1 p-3 bg-amber-50/45 rounded-xl border border-amber-100 flex flex-col justify-center">
+                <span className="text-[10px] uppercase font-bold text-amber-600 font-mono flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span> Unmarked
+                </span>
+                <span className="text-lg font-extrabold text-amber-800 mt-1">
+                  {galleryStatsForSelectedSession.unmarked}
+                  <span className="text-xs font-normal text-amber-500 ml-1.5">
+                    ({galleryStatsForSelectedSession.total > 0 ? Math.round((galleryStatsForSelectedSession.unmarked / galleryStatsForSelectedSession.total) * 100) : 0}%)
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            {/* Gallery Filter Toolbar */}
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 shadow-3xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+              <div className="flex flex-wrap items-center gap-3 flex-1">
+                {/* Search query */}
+                <div className="relative min-w-[200px] flex-1 md:flex-initial">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search student name or ID..."
+                    value={gallerySearchQuery}
+                    onChange={(e) => setGallerySearchQuery(e.target.value)}
+                    className="pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs w-full focus:outline-none focus:border-indigo-500 transition-colors placeholder-slate-400 shadow-3xs"
+                  />
+                  {gallerySearchQuery && (
+                    <button
+                      onClick={() => setGallerySearchQuery('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Cohort Select dropdown */}
+                <select
+                  value={gallerySelectedCohort}
+                  onChange={(e) => setGallerySelectedCohort(e.target.value)}
+                  className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-500 transition-colors cursor-pointer shadow-3xs"
+                >
+                  {COHORTS.map(c => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+
+                {/* Village select dropdown */}
+                <select
+                  value={gallerySelectedVillage}
+                  onChange={(e) => setGallerySelectedVillage(e.target.value)}
+                  className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-500 transition-colors cursor-pointer shadow-3xs"
+                >
+                  <option value="All Villages">All Villages</option>
+                  {uniqueVillages.map(v => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+
+                {/* Status select dropdown */}
+                <select
+                  value={galleryStatusFilter}
+                  onChange={(e) => setGalleryStatusFilter(e.target.value as any)}
+                  className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-none focus:border-indigo-500 transition-colors cursor-pointer shadow-3xs"
+                >
+                  <option value="all">All Attendance States</option>
+                  <option value="present">Present Only</option>
+                  <option value="absent">Absent Only</option>
+                  <option value="excused">Excused Only</option>
+                  <option value="unmarked">Unmarked Only</option>
+                </select>
+              </div>
+
+              {/* Reset Filters button */}
+              {(gallerySearchQuery || gallerySelectedCohort !== 'All Cohorts' || gallerySelectedVillage !== 'All Villages' || galleryStatusFilter !== 'all') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGallerySearchQuery('');
+                    setGallerySelectedCohort('All Cohorts');
+                    setGallerySelectedVillage('All Villages');
+                    setGalleryStatusFilter('all');
+                  }}
+                  className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1.5 cursor-pointer self-end md:self-auto bg-indigo-50 hover:bg-indigo-100/75 px-3 py-2 rounded-xl transition-all"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Reset Filters
+                </button>
+              )}
+            </div>
+
+            {/* Gallery Grid */}
+            {galleryFilteredParticipants.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center shadow-3xs animate-fade-in">
+                <LayoutGrid className="w-12 h-12 text-slate-300 mx-auto stroke-[1.2]" />
+                <h3 className="font-bold text-slate-800 mt-4 text-sm">No Participants Found</h3>
+                <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                  Try adjusting your search queries or dropdown filters to find students in the active roster.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 animate-fade-in">
+                {galleryFilteredParticipants.map((p) => {
+                  const sessionDate = gallerySelectedSessionDate || (sessions[sessions.length - 1]?.date || '');
+                  const currentStatus = (attendance[p.id] && attendance[p.id][sessionDate]) || 'unmarked';
+
+                  // Styles for state badges
+                  let statusLabel = 'Unmarked';
+                  let statusBadgeStyles = 'bg-slate-100 text-slate-500 border-slate-200';
+                  
+                  if (currentStatus === 'present') {
+                    statusLabel = 'Present';
+                    statusBadgeStyles = 'bg-emerald-50 text-emerald-700 border-emerald-100 font-bold';
+                  } else if (currentStatus === 'absent') {
+                    statusLabel = 'Absent';
+                    statusBadgeStyles = 'bg-rose-50 text-rose-700 border-rose-150 font-bold';
+                  } else if (currentStatus === 'excused') {
+                    statusLabel = 'Excused';
+                    statusBadgeStyles = 'bg-slate-50 text-slate-600 border-slate-150 font-bold';
+                  }
+
+                  return (
+                    <div 
+                      key={p.id}
+                      className="bg-white border border-slate-200 rounded-2xl p-4 shadow-3xs hover:shadow-2xs transition-all relative group flex flex-col justify-between"
+                    >
+                      {/* Interactive Inspector trigger block */}
+                      <div className="flex flex-col items-center text-center cursor-pointer mb-3.5" onClick={() => setSelectedParticipantId(p.id)}>
+                        {/* Profile photo with hover zoom effect */}
+                        <div className="relative mb-3">
+                          <div className={`h-20 w-20 rounded-full border-4 border-slate-50 flex items-center justify-center font-extrabold text-lg uppercase shadow-3xs overflow-hidden select-none transition-transform group-hover:scale-105 ${p.avatarColor}`}>
+                            {p.photoUrl ? (
+                              <img src={p.photoUrl} alt={p.name} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
+                            ) : (
+                              p.name.split(' ').map(n => n[0]).join('').slice(0, 2)
+                            )}
+                          </div>
+                          
+                          {/* Top corner gender badge */}
+                          {p.gender && (
+                            <span className={`absolute -bottom-1 -right-1 h-6 w-6 rounded-full border-2 border-white flex items-center justify-center text-[10px] font-bold shadow-3xs ${
+                              p.gender.toLowerCase() === 'female' ? 'bg-fuchsia-100 text-fuchsia-700' : 'bg-sky-100 text-sky-700'
+                            }`}>
+                              {p.gender.toLowerCase() === 'female' ? 'F' : 'M'}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Name and Cohort details */}
+                        <h4 className="font-bold text-sm text-slate-800 hover:text-indigo-700 transition-colors line-clamp-1">
+                          {p.name}
+                        </h4>
+                        
+                        <div className="flex flex-wrap justify-center gap-1.5 mt-1.5">
+                          <span className="text-[10px] font-semibold text-slate-500 bg-slate-100 rounded-md px-1.5 py-0.5">
+                            {p.cohort}
+                          </span>
+                          {p.village && (
+                            <span className="text-[10px] font-semibold text-slate-400 bg-slate-50 border border-slate-100 rounded-md px-1.5 py-0.5 max-w-[90px] truncate" title={p.village}>
+                              🏡 {p.village}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Attendance current badge and actions */}
+                      <div className="border-t border-slate-100 pt-3">
+                        <div className="flex items-center justify-between gap-2 mb-2.5">
+                          <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Status:</span>
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full border text-center select-none ${statusBadgeStyles}`}>
+                            {statusLabel}
+                          </span>
+                        </div>
+
+                        {/* Quick toggle check-in action group */}
+                        <div className="grid grid-cols-4 gap-1">
+                          <button
+                            type="button"
+                            onClick={() => setSpecificAttendance(p.id, sessionDate, 'present')}
+                            className={`py-1 text-[10px] font-bold rounded-lg border cursor-pointer transition-all ${
+                              currentStatus === 'present'
+                                ? 'bg-emerald-500 border-emerald-500 text-white shadow-3xs'
+                                : 'bg-white hover:bg-emerald-50 text-emerald-600 border-emerald-100'
+                            }`}
+                            title={`Mark ${p.name} as Present`}
+                          >
+                            P
+                          </button>
+                          
+                          <button
+                            type="button"
+                            onClick={() => setSpecificAttendance(p.id, sessionDate, 'absent')}
+                            className={`py-1 text-[10px] font-bold rounded-lg border cursor-pointer transition-all ${
+                              currentStatus === 'absent'
+                                ? 'bg-rose-500 border-rose-500 text-white shadow-3xs'
+                                : 'bg-white hover:bg-rose-50 text-rose-600 border-rose-100'
+                            }`}
+                            title={`Mark ${p.name} as Absent`}
+                          >
+                            A
+                          </button>
+                          
+                          <button
+                            type="button"
+                            onClick={() => setSpecificAttendance(p.id, sessionDate, 'excused')}
+                            className={`py-1 text-[10px] font-bold rounded-lg border cursor-pointer transition-all ${
+                              currentStatus === 'excused'
+                                ? 'bg-slate-500 border-slate-500 text-white shadow-3xs'
+                                : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-150'
+                            }`}
+                            title={`Mark ${p.name} as Excused`}
+                          >
+                            E
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setSpecificAttendance(p.id, sessionDate, 'unmarked')}
+                            className="py-1 text-[10px] font-bold rounded-lg border bg-white hover:bg-slate-100 text-slate-500 border-slate-200 cursor-pointer transition-all"
+                            title={`Clear ${p.name}'s attendance markings`}
+                          >
+                            C
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         {currentTab === 'journal' && (() => {
           const allJournalEntries = activeParticipants.flatMap(p => 
             (p.outreachNotes || []).map(log => ({
@@ -10231,6 +10961,103 @@ export default function App() {
                   })}
                 </div>
               )}
+
+              {/* APPROVED BUDGETS LEDGER SECTION */}
+              <div className="bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 shadow-xs mt-8">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-4 border-b border-slate-100 mb-6 gap-3">
+                  <div>
+                    <h3 className="text-base font-black text-slate-900 tracking-tight flex items-center gap-2">
+                      <span className="p-1.5 bg-emerald-50 border border-emerald-100 rounded-lg text-emerald-600">
+                        <Receipt className="w-4 h-4" />
+                      </span>
+                      📋 Approved Activity Budgets Ledger
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-1">Official authorized program activity estimates and budget authorizations.</p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  {budgets.filter(b => b.status === 'Approved').map(budget => (
+                    <div key={budget.id} className="border border-slate-200 hover:border-slate-300 rounded-2xl p-5 bg-slate-50/40 hover:bg-slate-50/75 transition-all shadow-3xs flex flex-col justify-between relative overflow-hidden">
+                      {/* Status indicator strip */}
+                      <div className="absolute top-0 left-0 right-0 h-1 bg-emerald-500" />
+
+                      <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                        <div className="space-y-1.5 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-[10px] bg-slate-200 text-slate-700 px-2 py-0.5 rounded font-bold">
+                              {budget.id}
+                            </span>
+                            <span className="text-[10px] font-black uppercase bg-emerald-50 border border-emerald-150 text-emerald-700 px-2.5 py-0.5 rounded-lg">
+                              {budget.category}
+                            </span>
+                            <span className="text-xs text-slate-400 font-mono">Approved: {budget.submittedAt}</span>
+                            <span className="text-xs text-slate-400 font-bold font-mono">Department: {budget.submittedBy}</span>
+                          </div>
+                          <h4 className="text-sm font-extrabold text-slate-900 mt-1">{budget.title}</h4>
+                          <p className="text-xs text-slate-500 leading-relaxed max-w-2xl">{budget.description}</p>
+                        </div>
+
+                        <div className="flex flex-col items-start md:items-end gap-1.5 shrink-0">
+                          <p className="text-[10px] font-bold text-slate-400 font-mono uppercase tracking-wider">AUTHORIZED AMOUNT</p>
+                          <p className="text-lg font-black text-slate-900 font-mono">UGX {budget.amount.toLocaleString()}</p>
+                        </div>
+                      </div>
+
+                      {/* Detailed line items */}
+                      {budget.items && budget.items.length > 0 && (
+                        <div className="mt-4 pt-4 border-t border-slate-100">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 font-mono">Authorized Expenditure Breakdown</p>
+                          <div className="flex flex-wrap gap-2">
+                            {(budget.items || []).map((item, idx) => {
+                              if (!item) return null;
+                              return (
+                                <span key={`bgt-item-journal-${budget.id}-${idx}`} className="bg-white border border-slate-200 rounded-lg px-2.5 py-1 text-[10.5px] text-slate-600 font-medium">
+                                  {item.name || 'Expense Item'} <span className="text-slate-400 font-normal">({item.qty || 0} × UGX {(item.unitCost || 0).toLocaleString()})</span>
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Action buttons (Print/Save in journal) */}
+                      <div className="mt-5 pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => generateBudgetPDF(budget, true)}
+                            className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] py-1.5 px-3 rounded-lg border border-slate-250 cursor-pointer flex items-center gap-1 shadow-3xs"
+                            title="Print this budget report"
+                          >
+                            <Printer className="w-3.5 h-3.5" />
+                            Print Budget
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => generateBudgetPDF(budget, false)}
+                            className="bg-white hover:bg-slate-50 text-slate-600 font-bold text-[11px] py-1.5 px-3 rounded-lg border border-slate-200 cursor-pointer flex items-center gap-1"
+                            title="Download official PDF document"
+                          >
+                            Download PDF
+                          </button>
+                        </div>
+                        
+                        <div className="text-[10.5px] text-slate-400 font-mono italic">
+                          Authorized Official Record • Lomuriangole CDC
+                        </div>
+                      </div>
+
+                    </div>
+                  ))}
+
+                  {budgets.filter(b => b.status === 'Approved').length === 0 && (
+                    <div className="text-center py-8 text-slate-400 italic bg-slate-50/50 rounded-2xl border border-dashed border-slate-200">
+                      No approved budgets currently in ledger. Once Project Director approves a department budget, it will appear here.
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           );
         })()}
@@ -10769,6 +11596,24 @@ export default function App() {
               </div>
             )}
           </div>
+        )}
+
+        {currentTab === 'staff-portals' && (
+          <CdoStaffPortals
+            participants={participants}
+            setParticipants={setParticipants}
+            staffTasks={staffTasks}
+            setStaffTasks={setStaffTasks}
+            complianceStatus={complianceStatus}
+            setComplianceStatus={setComplianceStatus}
+            onLogAudit={(action, details) => logSystemAction('audit', action, details)}
+            triggerSyncUpload={triggerSyncUpload}
+            currentUserEmail={currentUser?.email || 'admin@ug1083.org'}
+            auditTrailLogs={systemLogs}
+            budgets={budgets}
+            setBudgets={setBudgets}
+            isAdminMode={isAdminMode}
+          />
         )}
 
         {currentTab === 'admin' && (
@@ -14342,10 +15187,21 @@ export default function App() {
 
         <SessionInspectorModal 
           isOpen={!!selectedSessionDate}
-          onClose={() => setSelectedSessionDate(null)}
+          onClose={() => {
+            setSelectedSessionDate(null);
+            setCalendarSyncError(null);
+            setCalendarSyncSuccess(null);
+          }}
           session={currentSessionObj}
           attendanceStats={currentSessionStats}
           onUpdateSession={handleUpdateSessionData}
+          googleAccessToken={googleAccessToken}
+          onSyncToCalendar={syncSessionToCalendar}
+          isSyncingToCalendar={isSyncingToCalendar}
+          calendarSyncSuccess={calendarSyncSuccess}
+          calendarSyncError={calendarSyncError}
+          activeParticipants={activeParticipants}
+          attendance={attendance}
         />
 
         {/* EMAIL ALERT DISPATCH & SETTINGS MODAL */}

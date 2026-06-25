@@ -122,3 +122,24 @@ export interface AttendanceStats {
   hasYellowFlag: boolean; // 2 consecutive absences
   hasRedFlag: boolean; // 3+ total absences
 }
+
+export interface BudgetItem {
+  name: string;
+  qty: number;
+  unitCost: number;
+}
+
+export interface Budget {
+  id: string;
+  title: string;
+  category: 'Health' | 'Sponsor Relations' | 'Home-Based' | 'General';
+  amount: number;
+  description: string;
+  submittedBy: 'CDO HEALTH' | 'CDO SDR' | 'CDO HBP' | string;
+  submittedAt: string;
+  status: 'Draft' | 'Pending' | 'Approved' | 'Returned for Correction' | 'Signed-off';
+  correctionNotes?: string;
+  items: BudgetItem[];
+  signedOffMonth?: string;
+}
+

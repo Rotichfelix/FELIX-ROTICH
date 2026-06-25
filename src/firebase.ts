@@ -79,6 +79,10 @@ googleProvider.addScope('https://www.googleapis.com/auth/documents');
 googleProvider.addScope('https://www.googleapis.com/auth/classroom.courses.readonly');
 googleProvider.addScope('https://www.googleapis.com/auth/classroom.rosters.readonly');
 googleProvider.addScope('https://www.googleapis.com/auth/classroom.announcements');
+googleProvider.addScope('https://www.googleapis.com/auth/calendar');
+googleProvider.addScope('https://www.googleapis.com/auth/meetings.space.created');
+googleProvider.addScope('https://www.googleapis.com/auth/meetings.space.readonly');
+googleProvider.addScope('https://www.googleapis.com/auth/meetings.space.settings');
 
 // Hardened connection validation check (lazy check, can be invoked if required but not auto-run on module load to keep startup warnings clean)
 export async function checkFirestoreConnection() {

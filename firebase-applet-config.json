@@ -3,6 +3,7 @@
   "appId": "1:1008544073382:web:297efddee718467e7c1667",
   "apiKey": "AIzaSyCrDuu_k5bRUHN-L7MvKcEB8S0LxfqSqKA",
   "authDomain": "peta-girder-g53sn.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-532f9a72-3883-4473-a0be-af23f3142643",
   "storageBucket": "peta-girder-g53sn.firebasestorage.app",
   "messagingSenderId": "1008544073382",
   "measurementId": ""
