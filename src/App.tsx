@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, FormEvent, ChangeEvent, DragEvent, useMemo } from 'react';
+import { useState, useEffect, useRef, FormEvent, ChangeEvent, DragEvent, useMemo, MouseEvent, TouchEvent } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, Legend, LineChart, Line } from 'recharts';
 import { 
@@ -22,6 +22,7 @@ import {
   Check, 
   ArrowRight, 
   Clock, 
+  History,
   RotateCcw,
   FileText,
   Mail,
@@ -50,12 +51,13 @@ import {
   Receipt,
   Sparkles,
   Brain,
-  Bell
+  Bell,
+  KeyRound
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { getLogoBase64DataUri, getLogoPngDataUri, LogoSVG } from './components/LogoSVG';
 import { db, auth, googleProvider, storage } from './firebase';
-import { onAuthStateChanged, signInWithPopup, signOut, User, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, GoogleAuthProvider, sendEmailVerification } from 'firebase/auth';
+import { onAuthStateChanged, signInWithPopup, signOut, User, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, GoogleAuthProvider, sendEmailVerification, signInWithCustomToken } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { 
@@ -66,7 +68,10 @@ import {
   OutreachLog,
   AttendanceStats,
   OfficialDocument,
-  FilledForm
+  FilledForm,
+  Budget,
+  PettyCashRequest,
+  StaffPerformanceCycle
 } from './types';
 import { 
   INITIAL_PARTICIPANTS, 
@@ -334,6 +339,334 @@ export default function App() {
     ];
   });
 
+  const [pettyCashRequests, setPettyCashRequests] = useState<PettyCashRequest[]>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_petty_cash');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.error("Failed to load petty cash requests:", e);
+    }
+    return [
+      {
+        id: 'PC-2026-001',
+        amount: 50000,
+        purpose: 'Buying drinking water for the Saturday classes and emergency soap packages.',
+        dates: '2026-06-27',
+        submittedBy: 'CDO HEALTH',
+        submittedAt: '2026-06-25',
+        status: 'Approved',
+        aiEnhancedExplanation: 'Request to purchase clean drinking water and sanitary supplies. Saturday sessions involve rigorous activities, and provision of drinking water and medical soaps is vital to maintain child health and sanitation standards during high turnout days.',
+        isAiEnhanced: true
+      }
+    ];
+  });
+
+  const [performanceCycles, setPerformanceCycles] = useState<StaffPerformanceCycle[]>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_performance_cycles');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.error("Failed to load performance cycles:", e);
+    }
+    return [
+      {
+        id: 'PERF-2024-001',
+        staffName: 'AUMA FILDA NOMA',
+        staffRole: 'CDO SDR',
+        fiscalYear: 'FY 2024/2025',
+        status: 'Submitted',
+        submittedAt: '2024-07-02',
+        targets: [
+          {
+            id: 'T1',
+            kra: 'Sponsor Letters & Correspondence',
+            plannedActivities: 'Collect, translate, and scan 100% of children\'s letters for partners in the third quarter.',
+            measureOfSuccess: 'Zero backlog of letters; all 120 registered children submit letters on schedule.',
+            targetDate: '2024-09-30',
+            selfAssessment: 'Collected and scanned 115 letters successfully. Handled 5 complex cases directly.'
+          },
+          {
+            id: 'T2',
+            kra: 'Sponsor Gift Deliveries',
+            plannedActivities: 'Deliver incoming gifts to children, purchase designated household goods (goats, mattresses), and take verification photos.',
+            measureOfSuccess: 'Deliveries completed within 14 days of disbursement; 100% receipt signing.',
+            targetDate: '2024-12-15',
+            selfAssessment: 'All 14 goats purchased and delivered. Families expressed deep gratitude, signed vouchers attached.'
+          },
+          {
+            id: 'T3',
+            kra: 'Child Profile Updates',
+            plannedActivities: 'Update medical records, academic progress, and photos for all assigned sponsored children on the platform.',
+            measureOfSuccess: '100% updated child files with recent school report cards and heights/weights.',
+            targetDate: '2025-03-31'
+          }
+        ],
+        approvals: {
+          staffSignedName: 'AUMA FILDA NOMA',
+          staffSignedDate: '2024-07-02',
+          overallSelfComment: 'I am committed to raising the standard of partner communication in our center. All letters this term have been verified for neatness and authentic child expression.'
+        }
+      },
+      {
+        id: 'PERF-2024-002',
+        staffName: 'DR. JOHN OKORI',
+        staffRole: 'CDO HEALTH',
+        fiscalYear: 'FY 2024/2025',
+        status: 'Draft',
+        submittedAt: '2024-07-01',
+        targets: [
+          {
+            id: 'TH1',
+            kra: 'Deworming & Immunization Drives',
+            plannedActivities: 'Coordinate with Lomuriangole Health Center III to administer deworming tablets to all 120 children.',
+            measureOfSuccess: '95% child attendance and receipt of deworming treatment.',
+            targetDate: '2024-08-15'
+          },
+          {
+            id: 'TH2',
+            kra: 'Sanitary Care Kits Distribution',
+            plannedActivities: 'Assemble and distribute sanitary kits (soap, toothbrushes, girl hygiene packs) during the Saturday school assembly.',
+            measureOfSuccess: '120 kits distributed; workshop conducted on dental and personal hygiene.',
+            targetDate: '2024-10-10'
+          }
+        ],
+        approvals: {}
+      },
+      {
+        id: 'PERF-2024-003',
+        staffName: 'MARIA CHEGEM',
+        staffRole: 'CDO HBP',
+        fiscalYear: 'FY 2024/2025',
+        status: 'Approved',
+        submittedAt: '2024-07-03',
+        targets: [
+          {
+            id: 'TB1',
+            kra: 'Home-Based Follow-Ups',
+            plannedActivities: 'Conduct bi-monthly home visits to vulnerable home-based participants to assess nutrition and sanitation.',
+            measureOfSuccess: 'Completed 24 home visit sheets and registered them in the tracker.',
+            targetDate: '2024-11-30',
+            selfAssessment: 'Completed 26 visits including 2 emergency follow-ups.',
+            supervisorAssessment: 'Exceeded target. Followed up very well with critical nutrition cases.'
+          }
+        ],
+        approvals: {
+          staffSignedName: 'MARIA CHEGEM',
+          staffSignedDate: '2024-07-03',
+          supervisorSignedName: 'PROJECT DIRECTOR',
+          supervisorSignedDate: '2024-07-05',
+          overallSelfComment: 'Our home-based children are showing improved nutrition levels due to consistent porridge flour distribution.',
+          overallSupervisorComment: 'Maria has been exemplary in her home visitation program. Highly dedicated.',
+          reviewerComment: 'Good collaboration with the local health teams observed.',
+          reviewerSignedName: 'CHURCH OVERSEER',
+          reviewerSignedDate: '2024-07-15'
+        }
+      }
+    ];
+  });
+
+  const [monthlyJournals, setMonthlyJournals] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_monthly_journals');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error("Failed to load monthly journals:", e);
+    }
+    return [
+      {
+        id: "MJ-2026-04",
+        monthName: "April 2026",
+        closedAt: "2026-04-30T17:00:00.000Z",
+        closedBy: "PROJECT DIRECTOR",
+        budgets: [
+          {
+            id: "BGT-2026-04-01",
+            title: "Easter Community Dinner",
+            category: "Sponsor Relations",
+            amount: 280000,
+            description: "Easter celebration and community dinner for children and families.",
+            submittedBy: "CDO SDR",
+            submittedAt: "2026-04-10",
+            status: "Signed-off",
+            items: [
+              { name: "Food supplies", qty: 1, unitCost: 180000 },
+              { name: "Decorations & seating", qty: 1, unitCost: 100000 }
+            ]
+          }
+        ],
+        staffTasks: [
+          {
+            id: "T-2026-04-01",
+            title: "Easter Letter Distribution",
+            assignedRole: "CDO SDR",
+            priority: "high",
+            status: "completed",
+            dueDate: "2026-04-15",
+            description: "Distribute and collect letters from children to their sponsors.",
+            approvalStatus: "approved"
+          }
+        ],
+        pettyCashRequests: [
+          {
+            id: "PC-2026-04-01",
+            amount: 15000,
+            purpose: "Emergency transport for sick participant to clinic",
+            dates: "2026-04-12",
+            submittedBy: "CDO HEALTH",
+            submittedAt: "2026-04-12",
+            status: "Approved"
+          }
+        ]
+      },
+      {
+        id: "MJ-2026-05",
+        monthName: "May 2026",
+        closedAt: "2026-05-31T17:00:00.000Z",
+        closedBy: "PROJECT DIRECTOR",
+        budgets: [
+          {
+            id: "BGT-2026-05-01",
+            title: "First Aid Refresher Seminar",
+            category: "Health",
+            amount: 150000,
+            description: "Training session for staff and senior youth leaders.",
+            submittedBy: "CDO HEALTH",
+            submittedAt: "2026-05-12",
+            status: "Signed-off",
+            items: [
+              { name: "Trainer Fee", qty: 1, unitCost: 100000 },
+              { name: "Refreshments & Materials", qty: 20, unitCost: 2500 }
+            ]
+          }
+        ],
+        staffTasks: [
+          {
+            id: "T-2026-05-01",
+            title: "First Aid Materials Purchase",
+            assignedRole: "CDO HEALTH",
+            priority: "medium",
+            status: "completed",
+            dueDate: "2026-05-20",
+            description: "Purchase materials for the refresher session.",
+            approvalStatus: "approved"
+          }
+        ],
+        pettyCashRequests: [
+          {
+            id: "PC-2026-05-01",
+            amount: 22000,
+            purpose: "Lomuriangole water tank repair emergency fittings",
+            dates: "2026-05-15",
+            submittedBy: "PROJECT DIRECTOR",
+            submittedAt: "2026-05-15",
+            status: "Approved"
+          }
+        ]
+      }
+    ];
+  });
+
+  const [annualTargetsJournals, setAnnualTargetsJournals] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_annual_targets_journals');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error("Failed to load annual targets journals:", e);
+    }
+    return [
+      {
+        id: "ATJ-2026",
+        fiscalYear: "FY 2025/2026",
+        staffRole: "CDO HEALTH",
+        staffName: "DR. JOHN OKORI",
+        targets: [
+          {
+            id: "AT-2026-01",
+            kra: "Child Health Support",
+            plannedActivities: "Conduct 4 quarterly comprehensive health assessments for all cohorts.",
+            measureOfSuccess: "100% of active cohort children checked and treated.",
+            targetDate: "2026-06-30",
+            progressNotes: [
+              { id: "PN-01", date: "2025-10-15", note: "Q1 assessments completed successfully for 120 children.", author: "DR. JOHN OKORI" },
+              { id: "PN-02", date: "2026-01-20", note: "Q2 assessments completed. Identified 5 malnourished cases; initiated supplementary feed.", author: "DR. JOHN OKORI" },
+              { id: "PN-03", date: "2026-04-10", note: "Q3 assessments completed. All recovered fully.", author: "DR. JOHN OKORI" }
+            ]
+          },
+          {
+            id: "AT-2026-02",
+            kra: "Immunization Coverage",
+            plannedActivities: "Verify immunization cards and execute catch-up immunizations.",
+            measureOfSuccess: "95% immunization coverage across all active cohorts.",
+            targetDate: "2026-06-30",
+            progressNotes: [
+              { id: "PN-04", date: "2025-11-05", note: "Immunization cards collected for Cohorts A & B.", author: "DR. JOHN OKORI" }
+            ]
+          }
+        ]
+      }
+    ];
+  });
+
+  const [monthlyPerformanceTargets, setMonthlyPerformanceTargets] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_monthly_performance_targets');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error("Failed to load monthly performance targets:", e);
+    }
+    return [
+      {
+        id: "MPT-001",
+        kra: "Weekly Hygiene Checks",
+        plannedActivities: "Inspect nails, teeth, and general hygiene of 40 children every Friday.",
+        measureOfSuccess: "Hygiene compliance index improved from 70% to 90%.",
+        targetDate: "2026-06-30",
+        progressNotes: [
+          { id: "MPT-PN-01", date: "2026-06-12", note: "Conducted 2 rounds of checks. Distributed soap bars.", author: "DR. JOHN OKORI" }
+        ],
+        staffRole: "CDO HEALTH",
+        staffName: "DR. JOHN OKORI"
+      }
+    ];
+  });
+
+  const [closedMonthlyPerformanceJournals, setClosedMonthlyPerformanceJournals] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem('attendance_tracker_closed_monthly_performance_journals');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error("Failed to load closed monthly performance journals:", e);
+    }
+    return [
+      {
+        id: "CMPJ-2026-05",
+        monthName: "May 2026",
+        closedAt: "2026-05-31T17:00:00.000Z",
+        closedBy: "PROJECT DIRECTOR",
+        targets: [
+          {
+            id: "MPT-OLD-01",
+            kra: "Worm Treatment",
+            plannedActivities: "De-worm all children in Cohort A.",
+            measureOfSuccess: "100% deworming with certified medical dosage log.",
+            targetDate: "2026-05-25",
+            progressNotes: [
+              { id: "MPT-PN-OLD-01", date: "2026-05-24", note: "De-worming completed for all 45 children.", author: "DR. JOHN OKORI" }
+            ],
+            staffRole: "CDO HEALTH",
+            staffName: "DR. JOHN OKORI"
+          }
+        ]
+      }
+    ];
+  });
+
   const [aiReportLoading, setAiReportLoading] = useState(false);
   const [activeStatsTab, setActiveStatsTab] = useState<'cohorts' | 'villages' | 'genders' | 'schooling'>('cohorts');
   const [aiCohortReport, setAiCohortReport] = useState<{
@@ -503,6 +836,10 @@ export default function App() {
   const [smsCopied, setSmsCopied] = useState(false);
   const [smsSuccessMsg, setSmsSuccessMsg] = useState<string | null>(null);
   const [smsAccordionExpanded, setSmsAccordionExpanded] = useState(false);
+  const [smsHubActiveTab, setSmsHubActiveTab] = useState<'compose' | 'history'>('compose');
+  const [smsHistorySearchQuery, setSmsHistorySearchQuery] = useState('');
+  const [smsHistoryCampaignFilter, setSmsHistoryCampaignFilter] = useState<string>('all');
+  const [smsHistoryScopeFilter, setSmsHistoryScopeFilter] = useState<'all' | 'current'>('all');
 
   const getSmsDefaultMessage = (student: Participant, campaign: string, tone: string) => {
     const caregiverName = student.caregiver && student.caregiver !== '-' ? student.caregiver : 'Caregiver';
@@ -628,10 +965,10 @@ export default function App() {
         
         // Log outreach log dynamically inside participant file records
         const actorName = "Admin / Caseworker (via AT API)";
-        const newLogEntry = {
+        const newLogEntry: OutreachLog = {
           id: `outreach-${Date.now()}`,
           date: new Date().toISOString().split('T')[0],
-          by: actorName,
+          loggedBy: actorName,
           status: 'contacted' as const,
           notes: `[AT Gateway Direct SMS] Campaign: "${smsCampaignType}". Message: "${smsDraftMessage}"`
         };
@@ -718,6 +1055,14 @@ export default function App() {
   const [scanProcessingStep, setScanProcessingStep] = useState('');
   const [scanError, setScanError] = useState<string | null>(null);
   
+  // Camera scanning state variables
+  const [isDocCameraActive, setIsDocCameraActive] = useState(false);
+  const [docCameraStream, setDocCameraStream] = useState<MediaStream | null>(null);
+  const [docCameraDevices, setDocCameraDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDocCameraId, setSelectedDocCameraId] = useState<string>('');
+  const [docCameraError, setDocCameraError] = useState<string | null>(null);
+  const docVideoRef = useRef<HTMLVideoElement | null>(null);
+  
   // Official Document Uploads
   const [docUploadProgress, setDocUploadProgress] = useState<number>(0);
   const [isUploadingDoc, setIsUploadingDoc] = useState<boolean>(false);
@@ -731,6 +1076,7 @@ export default function App() {
   const [editingSessionOriginalDate, setEditingSessionOriginalDate] = useState<string | null>(null);
   const [editSessionDate, setEditSessionDate] = useState('');
   const [editSessionLabel, setEditSessionLabel] = useState('');
+  const [editSessionNotes, setEditSessionNotes] = useState('');
   const [bulkTargetDate, setBulkTargetDate] = useState('');
 
   // Heatmap Range Slider States with boundary protection and linkages
@@ -763,14 +1109,31 @@ export default function App() {
 
   // ---- FIREBASE AUTHENTICATION STATES ----
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [userRole, setUserRole] = useState<string>(() => {
+    return localStorage.getItem('attendance_tracker_user_role') || 'ADMINISTRATOR';
+  });
+  const [signupRole, setSignupRole] = useState<string>('ADMINISTRATOR');
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
   const [isSyncingWithCloud, setIsSyncingWithCloud] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [authMailMode, setAuthMailMode] = useState<'signin' | 'signup' | 'forgot'>('signin');
+  const [authMailMode, setAuthMailMode] = useState<'signin' | 'signup' | 'forgot' | 'otp'>('otp');
   const [authEmail, setAuthEmail] = useState<string>('');
   const [authPassword, setAuthPassword] = useState<string>('');
   const [authConfirmPassword, setAuthConfirmPassword] = useState<string>('');
   const [authMessage, setAuthMessage] = useState<string | null>(null);
+
+  // ---- OTP AUTHENTICATION STATES ----
+  const [otpCode, setOtpCode] = useState<string>('');
+  const [isOtpSent, setIsOtpSent] = useState<boolean>(false);
+  const [receivedDevCode, setReceivedDevCode] = useState<string | null>(null);
+  const [isOtpVerifying, setIsOtpVerifying] = useState<boolean>(false);
+
+  // ---- ADMIN USER MANAGEMENT STATES ----
+  const [adminUsers, setAdminUsers] = useState<Array<{ id: number; uid: string; email: string; role: string; createdAt: string }>>([]);
+  const [isAdminUsersLoading, setIsAdminUsersLoading] = useState<boolean>(false);
+  const [adminUsersError, setAdminUsersError] = useState<string | null>(null);
+  const [newUserEmail, setNewUserEmail] = useState<string>('');
+  const [newUserRole, setNewUserRole] = useState<string>('CDO HEALTH');
 
   // ---- AUTO BACKUP ENGINE STATES ----
   const [isAutoDownloadEnabled, setIsAutoDownloadEnabled] = useState<boolean>(() => {
@@ -879,6 +1242,15 @@ export default function App() {
     return localStorage.getItem('attendance_tracker_unsynced_changes') === 'true';
   });
   const [syncErrorMsg, setSyncErrorMsg] = useState<string | null>(null);
+  const [offlineAlert, setOfflineAlert] = useState<{ show: boolean, message: string, type: 'info' | 'success' | 'warn' } | null>(null);
+  const [isAutoSyncEnabled, setIsAutoSyncEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('attendance_tracker_auto_sync_enabled') !== 'false';
+  });
+  const [nextSyncAttemptTime, setNextSyncAttemptTime] = useState<string | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem('attendance_tracker_auto_sync_enabled', String(isAutoSyncEnabled));
+  }, [isAutoSyncEnabled]);
 
   // Trigger auto-download helper
   const triggerAutomatedDownload = (type: 'Exit' | 'SessionFinish', customData?: { 
@@ -1018,6 +1390,14 @@ export default function App() {
       isAutomaticEmailEnabled,
       staffTasks,
       complianceStatus,
+      userRole,
+      budgets,
+      pettyCashRequests,
+      performanceCycles,
+      monthlyJournals,
+      annualTargetsJournals,
+      monthlyPerformanceTargets,
+      closedMonthlyPerformanceJournals,
       lastUpdated: new Date().toISOString()
     };
 
@@ -1091,7 +1471,13 @@ export default function App() {
           });
 
           setParticipants(uniqueParticipants);
-          setSessions(data.sessions);
+          const seenSessions = new Set<string>();
+          const uniqueSessions = data.sessions.filter(s => {
+            if (!s || !s.date || seenSessions.has(s.date)) return false;
+            seenSessions.add(s.date);
+            return true;
+          });
+          setSessions(uniqueSessions);
           setAttendance(data.attendance);
 
           if (Array.isArray(data.emailedSessionDates)) {
@@ -1123,6 +1509,38 @@ export default function App() {
             setComplianceStatus(data.complianceStatus);
             localStorage.setItem('attendance_tracker_compliance_status', JSON.stringify(data.complianceStatus));
           }
+          if (data.userRole) {
+            setUserRole(data.userRole);
+            localStorage.setItem('attendance_tracker_user_role', data.userRole);
+          }
+          if (Array.isArray(data.budgets)) {
+            setBudgets(data.budgets);
+            localStorage.setItem('attendance_tracker_budgets', JSON.stringify(data.budgets));
+          }
+          if (Array.isArray(data.pettyCashRequests)) {
+            setPettyCashRequests(data.pettyCashRequests);
+            localStorage.setItem('attendance_tracker_petty_cash', JSON.stringify(data.pettyCashRequests));
+          }
+          if (Array.isArray(data.performanceCycles)) {
+            setPerformanceCycles(data.performanceCycles);
+            localStorage.setItem('attendance_tracker_performance_cycles', JSON.stringify(data.performanceCycles));
+          }
+          if (Array.isArray(data.monthlyJournals)) {
+            setMonthlyJournals(data.monthlyJournals);
+            localStorage.setItem('attendance_tracker_monthly_journals', JSON.stringify(data.monthlyJournals));
+          }
+          if (Array.isArray(data.annualTargetsJournals)) {
+            setAnnualTargetsJournals(data.annualTargetsJournals);
+            localStorage.setItem('attendance_tracker_annual_targets_journals', JSON.stringify(data.annualTargetsJournals));
+          }
+          if (Array.isArray(data.monthlyPerformanceTargets)) {
+            setMonthlyPerformanceTargets(data.monthlyPerformanceTargets);
+            localStorage.setItem('attendance_tracker_monthly_performance_targets', JSON.stringify(data.monthlyPerformanceTargets));
+          }
+          if (Array.isArray(data.closedMonthlyPerformanceJournals)) {
+            setClosedMonthlyPerformanceJournals(data.closedMonthlyPerformanceJournals);
+            localStorage.setItem('attendance_tracker_closed_monthly_performance_journals', JSON.stringify(data.closedMonthlyPerformanceJournals));
+          }
 
           // Save pulled values to local cache
           localStorage.setItem('attendance_tracker_participants', JSON.stringify(uniqueParticipants));
@@ -1151,8 +1569,18 @@ export default function App() {
       }
     }
   };
-  const [capturedPhotoPreview, setCapturedPhotoPreview] = useState<{ rawUrl: string; cropBox: any; finalUrl: string } | null>(null);
+  const [capturedPhotoPreview, setCapturedPhotoPreview] = useState<{
+    rawUrl: string;
+    cropBox: { x: number; y: number; size: number; found: boolean };
+    autoCropBox?: { x: number; y: number; size: number; found: boolean };
+    finalUrl: string;
+    width: number;
+    height: number;
+  } | null>(null);
   const [selectedPhotoFilter, setSelectedPhotoFilter] = useState<'none' | 'grayscale' | 'vintage' | 'dramatic' | 'warm' | 'cool'>('none');
+  const cropperPreloadedImageRef = useRef<HTMLImageElement | null>(null);
+  const cropperImageRef = useRef<HTMLImageElement | null>(null);
+  const [cropperDimensions, setCropperDimensions] = useState({ width: 0, height: 0 });
   const [parsedImportList, setParsedImportList] = useState<{
     id: string;
     name: string;
@@ -1372,6 +1800,11 @@ export default function App() {
       rawCtx.drawImage(video, 0, 0, originalWidth, originalHeight);
       const rawDataUrl = rawCanvas.toDataURL('image/jpeg', 0.95);
       
+      // Preload image into our fast rendering ref
+      const preloadedImg = new Image();
+      preloadedImg.src = rawDataUrl;
+      cropperPreloadedImageRef.current = preloadedImg;
+      
       // Step 2: Auto-detect skin centroid/face boundaries
       const faceBox = detectFaceInImageData(rawCtx, originalWidth, originalHeight);
       
@@ -1403,7 +1836,10 @@ export default function App() {
       setCapturedPhotoPreview({
         rawUrl: rawDataUrl,
         cropBox: faceBox,
-        finalUrl: croppedDataUrl
+        autoCropBox: faceBox,
+        finalUrl: croppedDataUrl,
+        width: originalWidth,
+        height: originalHeight
       });
       
     } catch (err: any) {
@@ -1412,40 +1848,213 @@ export default function App() {
     }
   };
 
+  const updatePhotoCrop = (newBox: { x: number; y: number; size: number }, filterType = selectedPhotoFilter) => {
+    if (!capturedPhotoPreview) return;
+    
+    const img = cropperPreloadedImageRef.current;
+    if (!img || !img.complete) {
+      const fallbackImg = new Image();
+      fallbackImg.onload = () => {
+        const canvas = document.createElement('canvas');
+        const finalSize = 320;
+        canvas.width = finalSize;
+        canvas.height = finalSize;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.filter = getCanvasFilterString(filterType);
+          ctx.drawImage(
+            fallbackImg,
+            newBox.x,
+            newBox.y,
+            newBox.size,
+            newBox.size,
+            0,
+            0,
+            finalSize,
+            finalSize
+          );
+          setCapturedPhotoPreview(prev => prev ? {
+            ...prev,
+            cropBox: { ...newBox, found: prev.cropBox?.found ?? false },
+            finalUrl: canvas.toDataURL('image/jpeg', 0.88)
+          } : null);
+        }
+      };
+      fallbackImg.src = capturedPhotoPreview.rawUrl;
+      return;
+    }
+    
+    const canvas = document.createElement('canvas');
+    const finalSize = 320;
+    canvas.width = finalSize;
+    canvas.height = finalSize;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.filter = getCanvasFilterString(filterType);
+      ctx.drawImage(
+        img,
+        newBox.x,
+        newBox.y,
+        newBox.size,
+        newBox.size,
+        0,
+        0,
+        finalSize,
+        finalSize
+      );
+      
+      setCapturedPhotoPreview(prev => prev ? {
+        ...prev,
+        cropBox: { ...newBox, found: prev.cropBox?.found ?? false },
+        finalUrl: canvas.toDataURL('image/jpeg', 0.88)
+      } : null);
+    }
+  };
+
+  const resetToAutoCrop = () => {
+    if (capturedPhotoPreview?.autoCropBox) {
+      updatePhotoCrop(capturedPhotoPreview.autoCropBox);
+    }
+  };
+
+  const handleCropperImageLoad = () => {
+    if (cropperImageRef.current) {
+      setCropperDimensions({
+        width: cropperImageRef.current.clientWidth,
+        height: cropperImageRef.current.clientHeight
+      });
+    }
+  };
+
+  const handleCropDragStart = (e: MouseEvent | TouchEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    
+    const startX = clientX;
+    const startY = clientY;
+    const currentBox = capturedPhotoPreview?.cropBox || { x: 0, y: 0, size: 320, found: false };
+    
+    const scaleX = cropperDimensions.width ? (cropperDimensions.width / (capturedPhotoPreview?.width || 1)) : 1;
+    const scaleY = cropperDimensions.height ? (cropperDimensions.height / (capturedPhotoPreview?.height || 1)) : 1;
+
+    const handleDragMove = (moveEvent: MouseEvent | TouchEvent) => {
+      const moveX = 'touches' in moveEvent ? moveEvent.touches[0].clientX : moveEvent.clientX;
+      const moveY = 'touches' in moveEvent ? moveEvent.touches[0].clientY : moveEvent.clientY;
+      
+      const deltaX = (moveX - startX) / scaleX;
+      const deltaY = (moveY - startY) / scaleY;
+      
+      let newX = currentBox.x + deltaX;
+      let newY = currentBox.y + deltaY;
+      
+      const maxCropX = (capturedPhotoPreview?.width || 320) - currentBox.size;
+      const maxCropY = (capturedPhotoPreview?.height || 320) - currentBox.size;
+      newX = Math.max(0, Math.min(maxCropX, newX));
+      newY = Math.max(0, Math.min(maxCropY, newY));
+      
+      updatePhotoCrop({
+        ...currentBox,
+        x: Math.round(newX),
+        y: Math.round(newY)
+      });
+    };
+    
+    const handleDragEnd = () => {
+      window.removeEventListener('mousemove', handleDragMove);
+      window.removeEventListener('mouseup', handleDragEnd);
+      window.removeEventListener('touchmove', handleDragMove);
+      window.removeEventListener('touchend', handleDragEnd);
+    };
+    
+    window.addEventListener('mousemove', handleDragMove);
+    window.addEventListener('mouseup', handleDragEnd);
+    window.addEventListener('touchmove', handleDragMove);
+    window.addEventListener('touchend', handleDragEnd);
+  };
+
+  const handleResizeDragStart = (e: MouseEvent | TouchEvent, handle: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right') => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    
+    const startX = clientX;
+    const startY = clientY;
+    const currentBox = capturedPhotoPreview?.cropBox || { x: 0, y: 0, size: 320, found: false };
+    
+    const scaleX = cropperDimensions.width ? (cropperDimensions.width / (capturedPhotoPreview?.width || 1)) : 1;
+    const scaleY = cropperDimensions.height ? (cropperDimensions.height / (capturedPhotoPreview?.height || 1)) : 1;
+
+    const imgWidth = capturedPhotoPreview?.width || 320;
+    const imgHeight = capturedPhotoPreview?.height || 320;
+    
+    const handleResizeMove = (moveEvent: MouseEvent | TouchEvent) => {
+      const moveX = 'touches' in moveEvent ? moveEvent.touches[0].clientX : moveEvent.clientX;
+      const moveY = 'touches' in moveEvent ? moveEvent.touches[0].clientY : moveEvent.clientY;
+      
+      const deltaX = (moveX - startX) / scaleX;
+      const deltaY = (moveY - startY) / scaleY;
+      
+      let newSize = currentBox.size;
+      let newX = currentBox.x;
+      let newY = currentBox.y;
+      
+      if (handle === 'bottom-right') {
+        const delta = Math.max(deltaX, deltaY);
+        newSize = Math.max(64, Math.min(imgWidth - currentBox.x, imgHeight - currentBox.y, currentBox.size + delta));
+      } else if (handle === 'top-left') {
+        const delta = Math.min(deltaX, deltaY);
+        const possibleNewSize = currentBox.size - delta;
+        const finalNewSize = Math.max(64, Math.min(currentBox.x + currentBox.size, currentBox.y + currentBox.size, possibleNewSize));
+        const sizeDiff = finalNewSize - currentBox.size;
+        newX = currentBox.x - sizeDiff;
+        newY = currentBox.y - sizeDiff;
+        newSize = finalNewSize;
+      } else if (handle === 'bottom-left') {
+        const delta = Math.max(-deltaX, deltaY);
+        const possibleNewSize = currentBox.size + delta;
+        const finalNewSize = Math.max(64, Math.min(currentBox.x + currentBox.size, imgHeight - currentBox.y, possibleNewSize));
+        const sizeDiff = finalNewSize - currentBox.size;
+        newX = currentBox.x - sizeDiff;
+        newSize = finalNewSize;
+      } else if (handle === 'top-right') {
+        const delta = Math.max(deltaX, -deltaY);
+        const possibleNewSize = currentBox.size + delta;
+        const finalNewSize = Math.max(64, Math.min(imgWidth - currentBox.x, currentBox.y + currentBox.size, possibleNewSize));
+        const sizeDiff = finalNewSize - currentBox.size;
+        newY = currentBox.y - sizeDiff;
+        newSize = finalNewSize;
+      }
+      
+      updatePhotoCrop({
+        ...currentBox,
+        x: Math.round(newX),
+        y: Math.round(newY),
+        size: Math.round(newSize)
+      });
+    };
+    
+    const handleResizeEnd = () => {
+      window.removeEventListener('mousemove', handleResizeMove);
+      window.removeEventListener('mouseup', handleResizeEnd);
+      window.removeEventListener('touchmove', handleResizeMove);
+      window.removeEventListener('touchend', handleResizeEnd);
+    };
+    
+    window.addEventListener('mousemove', handleResizeMove);
+    window.addEventListener('mouseup', handleResizeEnd);
+    window.addEventListener('touchmove', handleResizeMove);
+    window.addEventListener('touchend', handleResizeEnd);
+  };
+
   const applyFilterToPhoto = (filterType: 'none' | 'grayscale' | 'vintage' | 'dramatic' | 'warm' | 'cool') => {
     setSelectedPhotoFilter(filterType);
     if (!capturedPhotoPreview) return;
-    
-    // Dynamically re-bake photo with the new filter preset instantly
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      const finalSize = 320;
-      canvas.width = finalSize;
-      canvas.height = finalSize;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.filter = getCanvasFilterString(filterType);
-        const box = capturedPhotoPreview.cropBox;
-        ctx.drawImage(
-          img,
-          box.x,
-          box.y,
-          box.size,
-          box.size,
-          0,
-          0,
-          finalSize,
-          finalSize
-        );
-        
-        setCapturedPhotoPreview(prev => prev ? {
-          ...prev,
-          finalUrl: canvas.toDataURL('image/jpeg', 0.88)
-        } : null);
-      }
-    };
-    img.src = capturedPhotoPreview.rawUrl;
+    updatePhotoCrop(capturedPhotoPreview.cropBox, filterType);
   };
 
   const saveCapturedPhoto = (participantId: string) => {
@@ -1724,6 +2333,30 @@ export default function App() {
     localStorage.setItem('attendance_tracker_budgets', JSON.stringify(budgets));
   }, [budgets]);
 
+  useEffect(() => {
+    localStorage.setItem('attendance_tracker_petty_cash', JSON.stringify(pettyCashRequests));
+  }, [pettyCashRequests]);
+
+  useEffect(() => {
+    localStorage.setItem('attendance_tracker_performance_cycles', JSON.stringify(performanceCycles));
+  }, [performanceCycles]);
+
+  useEffect(() => {
+    localStorage.setItem('attendance_tracker_monthly_journals', JSON.stringify(monthlyJournals));
+  }, [monthlyJournals]);
+
+  useEffect(() => {
+    localStorage.setItem('attendance_tracker_annual_targets_journals', JSON.stringify(annualTargetsJournals));
+  }, [annualTargetsJournals]);
+
+  useEffect(() => {
+    localStorage.setItem('attendance_tracker_monthly_performance_targets', JSON.stringify(monthlyPerformanceTargets));
+  }, [monthlyPerformanceTargets]);
+
+  useEffect(() => {
+    localStorage.setItem('attendance_tracker_closed_monthly_performance_journals', JSON.stringify(closedMonthlyPerformanceJournals));
+  }, [closedMonthlyPerformanceJournals]);
+
   // Monitor tab closing, user exits, or navigates away for automated JSON backup
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1752,6 +2385,10 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       setIsAuthLoading(false);
+      if (!user) {
+        setUserRole('ADMINISTRATOR');
+        localStorage.removeItem('attendance_tracker_user_role');
+      }
     });
     return unsubscribe;
   }, []);
@@ -1780,7 +2417,13 @@ export default function App() {
             });
 
             setParticipants(uniqueParticipants);
-            setSessions(data.sessions);
+            const seenSessions = new Set<string>();
+            const uniqueSessions = data.sessions.filter(s => {
+              if (!s || !s.date || seenSessions.has(s.date)) return false;
+              seenSessions.add(s.date);
+              return true;
+            });
+            setSessions(uniqueSessions);
             setAttendance(data.attendance);
 
             if (Array.isArray(data.emailedSessionDates)) {
@@ -1803,6 +2446,13 @@ export default function App() {
               setIsAutomaticEmailEnabled(data.isAutomaticEmailEnabled);
               localStorage.setItem('attendance_tracker_auto_email_enabled', String(data.isAutomaticEmailEnabled));
             }
+            if (data.userRole) {
+              setUserRole(data.userRole);
+              localStorage.setItem('attendance_tracker_user_role', data.userRole);
+            } else {
+              setUserRole('ADMINISTRATOR');
+              localStorage.setItem('attendance_tracker_user_role', 'ADMINISTRATOR');
+            }
 
             setSyncStatus('synced');
             setHasPendingUnsavedChanges(false);
@@ -1823,9 +2473,12 @@ export default function App() {
             lastEmailedSessionDate,
             staffEmailRecipient,
             isAutomaticEmailEnabled,
+            userRole: signupRole,
             lastUpdated: new Date().toISOString()
           };
           await setDoc(docRef, dataToSync);
+          setUserRole(signupRole);
+          localStorage.setItem('attendance_tracker_user_role', signupRole);
           setSyncStatus('synced');
           setHasPendingUnsavedChanges(false);
           localStorage.setItem('attendance_tracker_unsynced_changes', 'false');
@@ -1861,12 +2514,33 @@ export default function App() {
 
     const handleOnline = () => {
       setIsOnline(true);
-      // Attempt syncing immediately on recovery
-      triggerSyncUpload({ participants, sessions, attendance });
+      if (isAutoSyncEnabled) {
+        setOfflineAlert({
+          show: true,
+          message: "✨ Lomuriangole Tracker is back online! Automatically synchronizing offline changes to the Cloud SQL database...",
+          type: "success"
+        });
+        // Attempt syncing immediately on recovery
+        triggerSyncUpload({ participants, sessions, attendance });
+      } else {
+        setOfflineAlert({
+          show: true,
+          message: "✨ Lomuriangole Tracker is back online! Manual upload is ready whenever you wish to save your changes.",
+          type: "info"
+        });
+      }
+      setTimeout(() => {
+        setOfflineAlert(prev => (prev?.type === 'success' || prev?.type === 'info') ? null : prev);
+      }, 5000);
     };
 
     const handleOffline = () => {
       setIsOnline(false);
+      setOfflineAlert({
+        show: true,
+        message: "⚠️ Cellular/satellite network offline. Attendance, budget updates, and journal entries will save securely to local storage & the service worker, auto-syncing when connection restores.",
+        type: "warn"
+      });
     };
 
     window.addEventListener('online', handleOnline);
@@ -1876,7 +2550,7 @@ export default function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [participants, sessions, attendance, currentUser]);
+  }, [participants, sessions, attendance, currentUser, isAutoSyncEnabled]);
 
   // Trigger auto sync on data changes
   useEffect(() => {
@@ -1890,13 +2564,47 @@ export default function App() {
     localStorage.setItem('attendance_tracker_unsynced_changes', 'true');
     setSyncStatus('unsynced');
 
+    if (!isAutoSyncEnabled) {
+      setNextSyncAttemptTime(null);
+      return;
+    }
+
+    const scheduledTime = new Date(Date.now() + 1500).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setNextSyncAttemptTime(scheduledTime);
+
     // Attempt trigger sync upload (debounced)
     const timeoutId = setTimeout(() => {
-      triggerSyncUpload({ participants, sessions, attendance });
+      triggerSyncUpload({ participants, sessions, attendance }).then(() => {
+        setNextSyncAttemptTime(null);
+      }).catch(() => {
+        setNextSyncAttemptTime(null);
+      });
     }, 1500);
 
-    return () => clearTimeout(timeoutId);
-  }, [participants, sessions, attendance]);
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [participants, sessions, attendance, isAutoSyncEnabled]);
+
+  // When auto-sync is toggled on, if there are pending unsaved changes, trigger sync
+  useEffect(() => {
+    if (isAutoSyncEnabled && hasPendingUnsavedChanges && !isFirstMount.current) {
+      const scheduledTime = new Date(Date.now() + 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      setNextSyncAttemptTime(scheduledTime);
+      const timeoutId = setTimeout(() => {
+        triggerSyncUpload({ participants, sessions, attendance }).then(() => {
+          setNextSyncAttemptTime(null);
+        }).catch(() => {
+          setNextSyncAttemptTime(null);
+        });
+      }, 1000);
+      return () => {
+        clearTimeout(timeoutId);
+      };
+    } else {
+      setNextSyncAttemptTime(null);
+    }
+  }, [isAutoSyncEnabled]);
 
   // ---- COMPUTING LIVE AGGREGATED METRICS ----
   // Gather metrics for active and former participants
@@ -2197,6 +2905,82 @@ export default function App() {
     acc[p.id] = calculateParticipantStats(p.id, filteredSessionsForAnalytics, attendance);
     return acc;
   }, {} as { [id: string]: ReturnType<typeof calculateParticipantStats> });
+
+  // Compute all Africa's Talking SMS outreach logs dynamically
+  const allSentSmsLogs = useMemo(() => {
+    const logs: Array<{
+      id: string;
+      timestamp: string;
+      participantId: string;
+      participantName: string;
+      participantContact: string;
+      status: string;
+      messageContent: string;
+      campaignType: string;
+    }> = [];
+
+    participants.forEach(p => {
+      if (p.outreachNotes) {
+        p.outreachNotes.forEach(note => {
+          if (note.notes && (note.notes.includes('[AT Gateway Direct SMS]') || note.notes.includes('[LOMURIALGOLE SMS]'))) {
+            let campaign = 'General Check-in';
+            let message = note.notes;
+            
+            const campaignMatch = note.notes.match(/Campaign:\s*"([^"]+)"/);
+            if (campaignMatch) {
+              campaign = campaignMatch[1];
+            }
+            
+            const messageMatch = note.notes.match(/Message:\s*"([\s\S]+)"$/) || note.notes.match(/Message:\s*"([\s\S]+)"/);
+            if (messageMatch) {
+              message = messageMatch[1];
+            } else {
+              message = note.notes.replace(/^\[AT Gateway Direct\s*SMS\]\s*/, '')
+                                  .replace(/^\[LOMURIALGOLE\s*SMS\]\s*/, '');
+            }
+
+            const statusLabel = 'Delivered';
+
+            let displayTime = note.date;
+            if (note.id && note.id.startsWith('outreach-')) {
+              const tsString = note.id.replace('outreach-', '');
+              const tsNum = parseInt(tsString, 15); // radix 10 but fallback friendly
+              const cleanTs = note.id.split('-')[1];
+              const parsedTs = parseInt(cleanTs, 10);
+              if (!isNaN(parsedTs)) {
+                const dateObj = new Date(parsedTs);
+                displayTime = dateObj.toLocaleString([], {
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit'
+                });
+              }
+            }
+
+            logs.push({
+              id: note.id,
+              timestamp: displayTime,
+              participantId: p.id,
+              participantName: p.name,
+              participantContact: p.contact || 'No Number',
+              status: statusLabel,
+              messageContent: message,
+              campaignType: campaign
+            });
+          }
+        });
+      }
+    });
+
+    return logs.sort((a, b) => {
+      const aTime = a.id.includes('-') ? parseInt(a.id.split('-')[1], 10) : 0;
+      const bTime = b.id.includes('-') ? parseInt(b.id.split('-')[1], 10) : 0;
+      if (aTime && bTime) return bTime - aTime;
+      return b.timestamp.localeCompare(a.timestamp);
+    });
+  }, [participants]);
 
   // A participant's red alert is suppressed from the tracker dashboard when they have a saved discussion log with status !== 'resolved'
   const isRedAlertSuppressed = (p: Participant) => {
@@ -4011,79 +4795,84 @@ export default function App() {
     let updatedCount = 0;
     let addedCount = 0;
 
-    setParticipants(prev => {
-      const currentParticipants = [...prev];
-      const newImportedList: Participant[] = [];
+    const currentParticipants = [...participants];
+    const newImportedList: Participant[] = [];
 
-      listToImport.forEach(item => {
-        const matched = importStrategy === 'upsert' ? findMatchingParticipant({ name: item.name, idNo: item.idNo, contact: item.contact }) : null;
-        if (matched) {
-          // Update the existing participant profile!
-          const idx = currentParticipants.findIndex(p => p.id === matched.id);
-          if (idx !== -1) {
-            const existing = currentParticipants[idx];
-            // Merge fields
-            currentParticipants[idx] = {
-              ...existing,
-              name: item.name || existing.name,
-              contact: (item.contact && item.contact !== '-') ? item.contact : existing.contact,
-              cohort: item.cohort || existing.cohort,
-              idNo: (item.idNo && item.idNo !== '-') ? item.idNo : existing.idNo,
-              age: (item.age && item.age !== '-') ? item.age : existing.age,
-              gender: (item.gender && item.gender !== '-') ? item.gender : existing.gender,
-              village: (item.village && item.village !== '-') ? item.village : existing.village,
-              caregiver: (item.caregiver && item.caregiver !== '-') ? item.caregiver : existing.caregiver,
-              schoolingStatus: (item.schoolingStatus && item.schoolingStatus !== '-') ? item.schoolingStatus : existing.schoolingStatus,
-              schoolClass: (item.schoolClass && item.schoolClass !== '-') ? item.schoolClass : existing.schoolClass,
-              registrationNotes: item.registrationNotes && item.registrationNotes !== 'Imported via spreadsheet preview mapper.' && item.registrationNotes !== 'Imported via JSON.'
-                ? `${existing.registrationNotes || ''}\n[Update]: ${item.registrationNotes}`
-                : existing.registrationNotes,
-              isImported: true
-            };
-            updatedCount++;
-          }
-        } else {
-          // Create a new participant model!
-          const randomColor = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
-          newImportedList.push({
-            id: `p_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
-            name: item.name,
-            contact: item.contact || '-',
-            cohort: item.cohort,
-            joinDate: new Date().toISOString().split('T')[0],
-            avatarColor: randomColor,
-            registrationNotes: item.registrationNotes || 'Imported via Bulk List.',
-            outreachNotes: [],
-            idNo: item.idNo || '-',
-            age: item.age || '-',
-            gender: item.gender || '-',
-            village: item.village || '-',
-            caregiver: item.caregiver || '-',
-            schoolingStatus: item.schoolingStatus || '-',
-            schoolClass: item.schoolClass || '-',
-            isPermanent: true,
+    listToImport.forEach(item => {
+      const matched = importStrategy === 'upsert' ? findMatchingParticipant({ name: item.name, idNo: item.idNo, contact: item.contact }) : null;
+      if (matched) {
+        // Update the existing participant profile!
+        const idx = currentParticipants.findIndex(p => p.id === matched.id);
+        if (idx !== -1) {
+          const existing = currentParticipants[idx];
+          // Merge fields
+          currentParticipants[idx] = {
+            ...existing,
+            name: item.name || existing.name,
+            contact: (item.contact && item.contact !== '-') ? item.contact : existing.contact,
+            cohort: item.cohort || existing.cohort,
+            idNo: (item.idNo && item.idNo !== '-') ? item.idNo : existing.idNo,
+            age: (item.age && item.age !== '-') ? item.age : existing.age,
+            gender: (item.gender && item.gender !== '-') ? item.gender : existing.gender,
+            village: (item.village && item.village !== '-') ? item.village : existing.village,
+            caregiver: (item.caregiver && item.caregiver !== '-') ? item.caregiver : existing.caregiver,
+            schoolingStatus: (item.schoolingStatus && item.schoolingStatus !== '-') ? item.schoolingStatus : existing.schoolingStatus,
+            schoolClass: (item.schoolClass && item.schoolClass !== '-') ? item.schoolClass : existing.schoolClass,
+            registrationNotes: item.registrationNotes && item.registrationNotes !== 'Imported via spreadsheet preview mapper.' && item.registrationNotes !== 'Imported via JSON.'
+              ? `${existing.registrationNotes || ''}\n[Update]: ${item.registrationNotes}`
+              : existing.registrationNotes,
             isImported: true
-          });
-          addedCount++;
+          };
+          updatedCount++;
         }
-      });
-
-      // Initialize default unmarked statuses for newly added participants
-      if (newImportedList.length > 0) {
-        setAttendance(attendancePrev => {
-          const updated = { ...attendancePrev };
-          newImportedList.forEach(p => {
-            updated[p.id] = {};
-            sessions.forEach(s => {
-              updated[p.id][s.date] = 'unmarked';
-            });
-          });
-          return updated;
+      } else {
+        // Create a new participant model!
+        const randomColor = AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
+        newImportedList.push({
+          id: `p_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
+          name: item.name,
+          contact: item.contact || '-',
+          cohort: item.cohort,
+          joinDate: new Date().toISOString().split('T')[0],
+          avatarColor: randomColor,
+          registrationNotes: item.registrationNotes || 'Imported via Bulk List.',
+          outreachNotes: [],
+          idNo: item.idNo || '-',
+          age: item.age || '-',
+          gender: item.gender || '-',
+          village: item.village || '-',
+          caregiver: item.caregiver || '-',
+          schoolingStatus: item.schoolingStatus || '-',
+          schoolClass: item.schoolClass || '-',
+          isPermanent: true,
+          isImported: true
         });
+        addedCount++;
       }
+    });
 
-      // Append new participants to updated current list
-      return [...currentParticipants, ...newImportedList];
+    // Prepare updated attendance record
+    const nextAttendance = { ...attendance };
+    if (newImportedList.length > 0) {
+      newImportedList.forEach(p => {
+        nextAttendance[p.id] = {};
+        sessions.forEach(s => {
+          nextAttendance[p.id][s.date] = 'unmarked';
+        });
+      });
+    }
+
+    const nextParticipants = [...currentParticipants, ...newImportedList];
+
+    // Set states
+    setAttendance(nextAttendance);
+    setParticipants(nextParticipants);
+
+    // Sync directly to Firestore/Cloud SQL backend in real-time
+    triggerSyncUpload({
+      participants: nextParticipants,
+      sessions,
+      attendance: nextAttendance
     });
 
     alert(`Successfully processed bulk import:\n- New participants added: ${addedCount}\n- Existing profiles updated: ${updatedCount}`);
@@ -4795,6 +5584,93 @@ export default function App() {
       return list;
     });
   };
+
+  const startDocCamera = async (deviceId?: string) => {
+    setDocCameraError(null);
+    setIsDocCameraActive(true);
+    
+    if (docCameraStream) {
+      docCameraStream.getTracks().forEach(track => track.stop());
+    }
+
+    try {
+      const constraints: MediaStreamConstraints = {
+        video: deviceId 
+          ? { deviceId: { exact: deviceId } } 
+          : { facingMode: { ideal: 'environment' } }
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      setDocCameraStream(stream);
+      if (docVideoRef.current) {
+        docVideoRef.current.srcObject = stream;
+      }
+
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(d => d.kind === 'videoinput');
+      setDocCameraDevices(videoDevices);
+      
+      if (!deviceId && videoDevices.length > 0) {
+        const activeTrack = stream.getVideoTracks()[0];
+        const activeSettings = activeTrack?.getSettings();
+        const activeDeviceId = activeSettings?.deviceId || videoDevices[0].deviceId;
+        setSelectedDocCameraId(activeDeviceId);
+      } else if (deviceId) {
+        setSelectedDocCameraId(deviceId);
+      }
+    } catch (err: any) {
+      console.error("Camera access error:", err);
+      setDocCameraError("Unable to access camera. Please ensure permissions are granted and no other app is using it.");
+      setIsDocCameraActive(false);
+    }
+  };
+
+  const stopDocCamera = () => {
+    if (docCameraStream) {
+      docCameraStream.getTracks().forEach(track => track.stop());
+      setDocCameraStream(null);
+    }
+    setIsDocCameraActive(false);
+    setDocCameraError(null);
+  };
+
+  const captureDocPhoto = () => {
+    if (!docVideoRef.current) return;
+    
+    try {
+      const video = docVideoRef.current;
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/png');
+        setScannedFilePreview(dataUrl);
+        setScanUploadedFileName(`camera_snapshot_${scannedFormType}_${new Date().toISOString().split('T')[0]}.png`);
+        setScanError(null);
+        stopDocCamera();
+      }
+    } catch (err: any) {
+      console.error("Capture photo error:", err);
+      setScanError("Failed to capture snapshot from camera.");
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (docCameraStream) {
+        docCameraStream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [docCameraStream]);
+
+  useEffect(() => {
+    if (!selectedParticipantId && isDocCameraActive) {
+      stopDocCamera();
+    }
+  }, [selectedParticipantId, isDocCameraActive]);
 
   const handleDeleteScannedForm = (participantId: string, formId: string) => {
     if (!isAdminMode) {
@@ -7232,24 +8108,29 @@ UG 1083 Child Development Office All Rights Reserved.`;
     // Mark matched active participants as present, others as absent
     const matchedIds = attendanceMatchingDetails.matchedIds;
 
-    setAttendance(prev => {
-      const updated = { ...prev };
-      activeParticipants.forEach(p => {
-        if (!updated[p.id]) {
-          updated[p.id] = {};
-        }
-        updated[p.id][attendanceImportDate] = matchedIds.has(p.id) ? 'present' : 'absent';
-      });
-
-      // Trigger automatic backup download of system data upon session finish / import complete
-      if (isAutoDownloadEnabled) {
-        setTimeout(() => {
-          triggerAutomatedDownload('SessionFinish', { sessions: updatedSessions, attendance: updated });
-        }, 150);
+    const nextAttendance = { ...attendance };
+    activeParticipants.forEach(p => {
+      if (!nextAttendance[p.id]) {
+        nextAttendance[p.id] = {};
       }
-
-      return updated;
+      nextAttendance[p.id][attendanceImportDate] = matchedIds.has(p.id) ? 'present' : 'absent';
     });
+
+    setAttendance(nextAttendance);
+
+    // Sync directly to Firestore/Cloud SQL backend in real-time
+    triggerSyncUpload({
+      participants,
+      sessions: updatedSessions,
+      attendance: nextAttendance
+    });
+
+    // Trigger automatic backup download of system data upon session finish / import complete
+    if (isAutoDownloadEnabled) {
+      setTimeout(() => {
+        triggerAutomatedDownload('SessionFinish', { sessions: updatedSessions, attendance: nextAttendance });
+      }, 150);
+    }
 
     alert(`Attendance successfully imported! \n- Marked PRESENT: ${matchedIds.size} student(s) \n- Marked ABSENT: ${activeParticipants.length - matchedIds.size} student(s) \n- Date: ${attendanceImportDate}`);
     logSystemAction('transaction', 'Bulk Attendance Imported', `Processed roster scan for session "${attendanceImportDate}": marked ${matchedIds.size} present and ${activeParticipants.length - matchedIds.size} absent.`);
@@ -7368,7 +8249,7 @@ UG 1083 Child Development Office All Rights Reserved.`;
     }));
   };
 
-  const handleEditSession = (oldDate: string, newDate: string, newLabel: string) => {
+  const handleEditSession = (oldDate: string, newDate: string, newLabel: string, newNotes?: string) => {
     if (!isAdminMode) {
       alert("Demographics and session modifications are restricted. Please unlock Admin Mode to modify system records.");
       setIsPasscodeFieldOpen(true);
@@ -7398,7 +8279,7 @@ UG 1083 Child Development Office All Rights Reserved.`;
 
     // Perform update
     setSessions(prev => {
-      const updated = prev.map(s => s.date === oldDate ? { ...s, date: newDate, label: cleanLabel } : s);
+      const updated = prev.map(s => s.date === oldDate ? { ...s, date: newDate, label: cleanLabel, notes: newNotes !== undefined ? newNotes : s.notes } : s);
       return [...updated].sort((a, b) => a.date.localeCompare(b.date));
     });
 
@@ -7589,6 +8470,186 @@ UG 1083 Child Development Office All Rights Reserved.`;
     }, 2000);
   };
 
+  // ---- OTP AUTHENTICATION HANDLERS ----
+  const handleSendOtp = async (e?: FormEvent) => {
+    if (e) e.preventDefault();
+    setAuthError(null);
+    setAuthMessage(null);
+    setReceivedDevCode(null);
+
+    if (!authEmail.trim()) {
+      setAuthError("Email address is required to receive a verification code.");
+      return;
+    }
+
+    try {
+      setIsAuthLoading(true);
+      const response = await fetch('/api/auth/otp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: authEmail.trim() }),
+      });
+
+      const resData = await response.json();
+      if (!response.ok) {
+        throw new Error(resData.error || 'Failed to send verification code.');
+      }
+
+      setIsOtpSent(true);
+      setAuthMessage("A secure verification code has been generated and issued to your email.");
+      if (resData.devPreviewCode) {
+        setReceivedDevCode(resData.devPreviewCode);
+      }
+    } catch (err: any) {
+      console.error("OTP send failed:", err);
+      setAuthError(err.message || "Failed to process verification code request. Please make sure your account email has been registered by the administrator.");
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e: FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthMessage(null);
+
+    if (!authEmail.trim() || !otpCode.trim()) {
+      setAuthError("Email and 6-digit verification code are required.");
+      return;
+    }
+
+    try {
+      setIsOtpVerifying(true);
+      const response = await fetch('/api/auth/otp/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: authEmail.trim(), code: otpCode.trim() }),
+      });
+
+      const resData = await response.json();
+      if (!response.ok) {
+        throw new Error(resData.error || 'Invalid verification code.');
+      }
+
+      if (resData.customToken) {
+        setAuthMessage("Code verified! Synchronizing tracking registers...");
+        await signInWithCustomToken(auth, resData.customToken);
+      } else {
+        throw new Error("Server did not return authentication token.");
+      }
+    } catch (err: any) {
+      console.error("OTP verification failed:", err);
+      setAuthError(err.message || "Invalid or expired verification code. Please request a new one.");
+    } finally {
+      setIsOtpVerifying(false);
+    }
+  };
+
+  // ---- ADMIN USER MANAGEMENT HANDLERS ----
+  const fetchAdminUsers = async () => {
+    if (!currentUser) return;
+    setAdminUsersError(null);
+    setIsAdminUsersLoading(true);
+
+    try {
+      const token = await currentUser.getIdToken();
+      const response = await fetch('/api/admin/users', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || 'Failed to retrieve user accounts');
+      }
+
+      const data = await response.json();
+      setAdminUsers(data);
+    } catch (err: any) {
+      console.error("Failed to load users:", err);
+      setAdminUsersError(err.message || "Failed to retrieve user accounts database.");
+    } finally {
+      setIsAdminUsersLoading(false);
+    }
+  };
+
+  const handleCreateAdminUser = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!currentUser) return;
+    setAdminUsersError(null);
+
+    if (!newUserEmail.trim()) {
+      setAdminUsersError("Email is required to create a new user account.");
+      return;
+    }
+
+    try {
+      setIsAdminUsersLoading(true);
+      const token = await currentUser.getIdToken();
+      const response = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ email: newUserEmail.trim(), role: newUserRole }),
+      });
+
+      const resData = await response.json();
+      if (!response.ok) {
+        throw new Error(resData.error || 'Failed to create user account');
+      }
+
+      setNewUserEmail('');
+      await fetchAdminUsers();
+    } catch (err: any) {
+      console.error("Failed to create user:", err);
+      setAdminUsersError(err.message || "Failed to register new system user account.");
+    } finally {
+      setIsAdminUsersLoading(false);
+    }
+  };
+
+  const handleDeleteAdminUser = async (id: number) => {
+    if (!currentUser) return;
+    if (!window.confirm("Are you absolutely sure you want to delete this user's account? They will lose secure system access immediately.")) {
+      return;
+    }
+    setAdminUsersError(null);
+
+    try {
+      setIsAdminUsersLoading(true);
+      const token = await currentUser.getIdToken();
+      const response = await fetch(`/api/admin/users/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      const resData = await response.json();
+      if (!response.ok) {
+        throw new Error(resData.error || 'Failed to delete user account');
+      }
+
+      await fetchAdminUsers();
+    } catch (err: any) {
+      console.error("Failed to delete user:", err);
+      setAdminUsersError(err.message || "Failed to delete user account.");
+    } finally {
+      setIsAdminUsersLoading(false);
+    }
+  };
+
+  // Auto load users on admin tab load
+  useEffect(() => {
+    const isUserAdmin = !userRole || userRole === 'ADMINISTRATOR';
+    if (currentTab === 'admin' && isUserAdmin && currentUser) {
+      fetchAdminUsers();
+    }
+  }, [currentTab, userRole, currentUser]);
+
   if (isAuthLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center font-sans p-6">
@@ -7715,36 +8776,54 @@ UG 1083 Child Development Office All Rights Reserved.`;
 
           {/* Tab Switch Selector for Credentials */}
           {authMailMode !== 'forgot' ? (
-            <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
+            <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 gap-1 overflow-x-auto shrink-0">
               <button
+                type="button"
+                onClick={() => {
+                  setAuthMailMode('otp');
+                  setAuthError(null);
+                  setAuthMessage(null);
+                }}
+                className={`flex-1 py-1.5 text-[11px] sm:text-xs font-bold rounded-lg transition-all cursor-pointer text-center whitespace-nowrap px-1.5 ${
+                  authMailMode === 'otp'
+                    ? 'bg-white text-indigo-700 shadow-xs font-black'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+                id="switch-otp"
+              >
+                🔢 Code Sign-In
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setAuthMailMode('signin');
                   setAuthError(null);
                   setAuthMessage(null);
                 }}
-                className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${
+                className={`flex-1 py-1.5 text-[11px] sm:text-xs font-bold rounded-lg transition-all cursor-pointer text-center whitespace-nowrap px-1.5 ${
                   authMailMode === 'signin'
                     ? 'bg-white text-slate-900 shadow-xs'
                     : 'text-slate-500 hover:text-slate-800'
                 }`}
                 id="switch-signin"
               >
-                Sign In Account
+                Sign In
               </button>
               <button
+                type="button"
                 onClick={() => {
                   setAuthMailMode('signup');
                   setAuthError(null);
                   setAuthMessage(null);
                 }}
-                className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${
+                className={`flex-1 py-1.5 text-[11px] sm:text-xs font-bold rounded-lg transition-all cursor-pointer text-center whitespace-nowrap px-1.5 ${
                   authMailMode === 'signup'
                     ? 'bg-white text-slate-900 shadow-xs'
                     : 'text-slate-500 hover:text-slate-800'
                 }`}
                 id="switch-signup"
               >
-                Create Account
+                Register
               </button>
             </div>
           ) : (
@@ -7783,110 +8862,224 @@ UG 1083 Child Development Office All Rights Reserved.`;
             </div>
           )}
 
-          {/* Email and Password Credentials Form */}
-          <form onSubmit={handleEmailAuth} className="space-y-3.5 text-left">
-            <div>
-              <label className="block text-[11px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">Email Address</label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                  <Mail className="h-4 w-4 text-slate-400" />
-                </div>
-                <input
-                  type="email"
-                  value={authEmail}
-                  onChange={(e) => setAuthEmail(e.target.value)}
-                  placeholder="e.g. administrator@cydc.org"
-                  className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-250 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs"
-                  required
-                  autoComplete="username"
-                />
-              </div>
-            </div>
-
-            {authMailMode !== 'forgot' && (
+          {authMailMode === 'otp' ? (
+            <form onSubmit={isOtpSent ? handleVerifyOtp : handleSendOtp} className="space-y-4 text-left">
               <div>
-                <div className="flex items-center justify-between">
-                  <label className="block text-[11px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">Password</label>
-                  {authMailMode === 'signin' && (
+                <label className="block text-[11px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">Email Address (Username)</label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                    <Mail className="h-4 w-4 text-slate-400" />
+                  </div>
+                  <input
+                    type="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="e.g. staff@cydc.org"
+                    className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-250 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs"
+                    required
+                    disabled={isOtpSent}
+                    autoComplete="username"
+                  />
+                </div>
+              </div>
+
+              {isOtpSent && (
+                <motion.div
+                  initial={{ opacity: 0, y: -5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="space-y-1.5"
+                >
+                  <div className="flex items-center justify-between">
+                    <label className="block text-[11px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">6-Digit Verification Code</label>
                     <button
                       type="button"
                       onClick={() => {
-                        setAuthMailMode('forgot');
+                        setIsOtpSent(false);
+                        setOtpCode('');
                         setAuthError(null);
                         setAuthMessage(null);
+                        setReceivedDevCode(null);
                       }}
-                      className="text-[10px] text-indigo-600 hover:text-indigo-800 font-extrabold hover:underline mb-1.5 cursor-pointer"
+                      className="text-[10px] text-indigo-600 hover:text-indigo-800 font-extrabold cursor-pointer"
                     >
-                      Forgot password?
+                      Change Email
                     </button>
-                  )}
-                </div>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                    <Lock className="h-4 w-4 text-slate-400" />
                   </div>
-                  <input
-                    type="password"
-                    value={authPassword}
-                    onChange={(e) => setAuthPassword(e.target.value)}
-                    placeholder="Enter secure account password"
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-250 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs"
-                    required
-                    autoComplete={authMailMode === 'signup' ? 'new-password' : 'current-password'}
-                  />
-                </div>
-              </div>
-            )}
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                      <Lock className="h-4 w-4 text-slate-400" />
+                    </div>
+                    <input
+                      type="text"
+                      maxLength={6}
+                      value={otpCode}
+                      onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                      placeholder="Enter 6-digit code"
+                      className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-250 rounded-xl text-xs font-bold tracking-widest text-slate-800 text-center focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs"
+                      required
+                    />
+                  </div>
+                </motion.div>
+              )}
 
-            {authMailMode === 'signup' && (
-              <motion.div
-                initial={{ opacity: 0, y: -5 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="space-y-1"
+              {receivedDevCode && (
+                <div className="bg-amber-500/10 border border-amber-300/40 rounded-xl p-3 text-left animate-bounce">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse"></span>
+                    <span className="text-[11px] font-extrabold text-amber-800">Preview OTP helper:</span>
+                  </div>
+                  <p className="text-[10.5px] text-amber-700 font-sans mt-1">
+                    Your verification code is: <span className="font-mono bg-amber-500/20 px-1.5 py-0.5 rounded text-amber-950 font-black">{receivedDevCode}</span>
+                  </p>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isOtpVerifying}
+                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs py-3 px-4 rounded-xl cursor-pointer transition-all shadow-xs hover:shadow-md flex items-center justify-center gap-1.5"
               >
-                <label className="block text-[11px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">Confirm Password</label>
+                {isOtpVerifying ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Verifying Code...</span>
+                  </>
+                ) : (
+                  <>
+                    <KeyRound className="w-3.5 h-3.5 text-amber-300" />
+                    <span>{isOtpSent ? "Verify & Log In" : "Receive Login Code"}</span>
+                  </>
+                )}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleEmailAuth} className="space-y-3.5 text-left">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">Email Address</label>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                    <Lock className="h-4 w-4 text-slate-400" />
+                    <Mail className="h-4 w-4 text-slate-400" />
                   </div>
                   <input
-                    type="password"
-                    value={authConfirmPassword}
-                    onChange={(e) => setAuthConfirmPassword(e.target.value)}
-                    placeholder="Repeat password to verify"
+                    type="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="e.g. administrator@cydc.org"
                     className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-250 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs"
                     required
-                    autoComplete="new-password"
+                    autoComplete="username"
                   />
                 </div>
-              </motion.div>
-            )}
-
-            <button
-              type="submit"
-              className="w-full bg-slate-900 hover:bg-slate-950 text-white font-extrabold text-xs py-3 px-4 rounded-xl cursor-pointer transition-all shadow-xs hover:shadow-md flex items-center justify-center gap-1.5"
-              id="submit-auth-btn"
-            >
-              <Lock className="w-3.5 h-3.5 text-amber-300" />
-              {authMailMode === 'signup' ? "Create Syncable Account" : authMailMode === 'forgot' ? "Send Password Reset Link" : "Access Syncable Registers"}
-            </button>
-
-            {authMailMode === 'forgot' && (
-              <div className="text-center pt-1.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMailMode('signin');
-                    setAuthError(null);
-                    setAuthMessage(null);
-                  }}
-                  className="text-xs text-indigo-600 hover:text-indigo-800 font-extrabold hover:underline cursor-pointer"
-                >
-                  Return to Sign In Account
-                </button>
               </div>
-            )}
-          </form>
+
+              {authMailMode !== 'forgot' && (
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label className="block text-[11px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">Password</label>
+                    {authMailMode === 'signin' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthMailMode('forgot');
+                          setAuthError(null);
+                          setAuthMessage(null);
+                        }}
+                        className="text-[10px] text-indigo-600 hover:text-indigo-800 font-extrabold hover:underline mb-1.5 cursor-pointer"
+                      >
+                        Forgot password?
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                      <Lock className="h-4 w-4 text-slate-400" />
+                    </div>
+                    <input
+                      type="password"
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      placeholder="Enter secure account password"
+                      className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-250 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs"
+                      required
+                      autoComplete={authMailMode === 'signup' ? 'new-password' : 'current-password'}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {authMailMode === 'signup' && (
+                <>
+                  <motion.div
+                    initial={{ opacity: 0, y: -5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="space-y-1"
+                  >
+                    <label className="block text-[11px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">Confirm Password</label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                        <Lock className="h-4 w-4 text-slate-400" />
+                      </div>
+                      <input
+                        type="password"
+                        value={authConfirmPassword}
+                        onChange={(e) => setAuthConfirmPassword(e.target.value)}
+                        placeholder="Repeat password to verify"
+                        className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-250 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs"
+                        required
+                        autoComplete="new-password"
+                      />
+                    </div>
+                  </motion.div>
+
+                  <motion.div
+                    initial={{ opacity: 0, y: -5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="space-y-1 mt-3"
+                  >
+                    <label className="block text-[11px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">Assign Your Staff Role</label>
+                    <select
+                      value={signupRole}
+                      onChange={(e) => setSignupRole(e.target.value)}
+                      className="w-full px-4 py-2.5 bg-slate-50 border border-slate-250 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs"
+                    >
+                      <option value="ADMINISTRATOR">Administrator (Full Access)</option>
+                      <option value="CDO HEALTH">CDO Health Dashboard</option>
+                      <option value="CDO SDR">CDO Sponsor Relations Dashboard</option>
+                      <option value="CDO HBP">CDO Home-Based Program Dashboard</option>
+                      <option value="PROJECT DIRECTOR">Project Director Dashboard</option>
+                      <option value="OVERSEER">Church Overseer Desk</option>
+                      <option value="OFFICIAL JOURNALS">Archival Journals Dashboard</option>
+                    </select>
+                  </motion.div>
+                </>
+              )}
+
+              <button
+                type="submit"
+                className="w-full bg-slate-900 hover:bg-slate-950 text-white font-extrabold text-xs py-3 px-4 rounded-xl cursor-pointer transition-all shadow-xs hover:shadow-md flex items-center justify-center gap-1.5"
+                id="submit-auth-btn"
+              >
+                <Lock className="w-3.5 h-3.5 text-amber-300" />
+                {authMailMode === 'signup' ? "Create Syncable Account" : authMailMode === 'forgot' ? "Send Password Reset Link" : "Access Syncable Registers"}
+              </button>
+
+              {authMailMode === 'forgot' && (
+                <div className="text-center pt-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthMailMode('signin');
+                      setAuthError(null);
+                      setAuthMessage(null);
+                    }}
+                    className="text-xs text-indigo-600 hover:text-indigo-800 font-extrabold hover:underline cursor-pointer"
+                  >
+                    Return to Sign In Account
+                  </button>
+                </div>
+              )}
+            </form>
+          )}
 
           {/* Visual Divider / Fallback Selector */}
           <div className="flex items-center gap-3">
@@ -7967,9 +9160,41 @@ UG 1083 Child Development Office All Rights Reserved.`;
     );
   }
 
+  const isUserAdmin = !userRole || userRole === 'ADMINISTRATOR';
+  const resolvedTab = isUserAdmin ? currentTab : 'staff-portals';
+
   return (
     <div className="min-h-screen bg-slate-50/50 text-slate-800 font-sans selection:bg-amber-100 selection:text-amber-900">
       
+      {offlineAlert && offlineAlert.show && (
+        <div className={`px-4 py-3 text-center text-xs font-semibold transition-all duration-300 flex items-center justify-between gap-3 ${
+          offlineAlert.type === 'success' 
+            ? 'bg-emerald-600 text-white border-b border-emerald-700' 
+            : offlineAlert.type === 'info'
+            ? 'bg-indigo-600 text-white border-b border-indigo-700'
+            : 'bg-amber-500 text-amber-950 border-b border-amber-600'
+        } shadow-sm z-50 sticky top-0`}>
+          <div className="flex items-center gap-2 mx-auto">
+            {offlineAlert.type === 'success' ? (
+              <CheckCircle className="w-4 h-4 text-emerald-100 shrink-0" />
+            ) : offlineAlert.type === 'info' ? (
+              <Info className="w-4 h-4 text-indigo-100 shrink-0 animate-pulse" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-amber-950 shrink-0 animate-pulse" />
+            )}
+            <span>{offlineAlert.message}</span>
+          </div>
+          <button 
+            type="button"
+            onClick={() => setOfflineAlert(null)}
+            className="text-sm font-bold opacity-75 hover:opacity-100 px-2 py-0.5 rounded focus:outline-none transition-opacity"
+            aria-label="Dismiss banner"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* HEADER SECTION */}
       <header id="main-header" className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-xs">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-4">
@@ -8081,18 +9306,18 @@ UG 1083 Child Development Office All Rights Reserved.`;
           )}
 
           {/* REAL-TIME OFFLINE/ONLINE BACKUP SYNCHRONIZER CONTROLLER */}
-          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 text-xs font-sans xl:max-w-md w-full">
-            <div className="space-y-0.5">
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 flex flex-col gap-2.5 text-xs font-sans xl:max-w-md w-full shadow-3xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-2">
               <div className="flex flex-wrap items-center gap-1.5 font-bold text-slate-850">
                 {isOnline ? (
                   <span className="flex items-center gap-1 text-emerald-600">
                     <Wifi className="w-4 h-4 text-emerald-500 shrink-0" />
-                    🟢 Online Mode
+                    🟢 Online
                   </span>
                 ) : (
                   <span className="flex items-center gap-1 text-rose-600 animate-pulse">
                     <WifiOff className="w-4 h-4 text-rose-500 shrink-0" />
-                    🔴 Offline Mode
+                    🔴 Offline
                   </span>
                 )}
                 <span className="text-slate-300 text-[10px] font-normal">|</span>
@@ -8119,50 +9344,82 @@ UG 1083 Child Development Office All Rights Reserved.`;
                   </span>
                 )}
               </div>
-              
-              <div className="text-[10px] text-slate-500 flex flex-col gap-0.5">
+
+              {/* Auto-Sync Toggle Switch */}
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={isAutoSyncEnabled}
+                  onChange={(e) => setIsAutoSyncEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="relative w-7 h-4 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:start-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-600"></div>
+                <span className="text-[10px] font-bold text-slate-700">Auto-Sync</span>
+              </label>
+            </div>
+            
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="text-[10px] text-slate-500 flex flex-col gap-0.5 leading-relaxed">
                 <span className="block font-semibold">
                   {lastSyncTime ? `Last Synced: ${lastSyncTime}` : 'Offline caching active (local only)'}
                 </span>
+                
+                {/* Next sync attempt time indicator */}
+                {isAutoSyncEnabled ? (
+                  nextSyncAttemptTime ? (
+                    <span className="text-indigo-600 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded text-[9.5px] font-bold font-mono inline-flex items-center gap-1 mt-0.5 max-w-max animate-pulse">
+                      ⏳ Next sync scheduled at: {nextSyncAttemptTime}
+                    </span>
+                  ) : (
+                    <span className="text-emerald-600 bg-emerald-50/50 border border-emerald-100/50 px-1.5 py-0.5 rounded text-[9.5px] font-medium font-mono inline-flex items-center gap-1 mt-0.5 max-w-max">
+                      ✓ Idle (Auto-sync ready)
+                    </span>
+                  )
+                ) : (
+                  <span className="text-amber-600 bg-amber-50 border border-amber-100 px-1.5 py-0.5 rounded text-[9.5px] font-bold font-mono inline-flex items-center gap-1 mt-0.5 max-w-max">
+                    ⏸ Auto-sync paused (Manual save needed)
+                  </span>
+                )}
+                
                 {hasPendingUnsavedChanges && (
-                  <span className="text-amber-600 font-bold text-[9px] uppercase tracking-wider block">
+                  <span className="text-amber-600 font-bold text-[9px] uppercase tracking-wider block mt-0.5">
                     ⚠️ Saved locally (unsynced with cloud)
                   </span>
                 )}
               </div>
-            </div>
 
-            {/* Sync trigger buttons */}
-            <div className="flex items-center gap-1.5 shrink-0 self-end md:self-center">
-              <button
-                type="button"
-                onClick={() => triggerSyncUpload()}
-                disabled={syncStatus === 'syncing' || !isOnline}
-                title="Save database immediately to server backup storage"
-                className={`flex items-center gap-1.5 py-1 px-2.5 rounded-lg border text-[11px] font-bold shadow-3xs transition-all cursor-pointer ${
-                  !isOnline 
-                    ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
-                    : 'bg-white hover:bg-slate-50 text-indigo-700 border-indigo-200 hover:border-indigo-300'
-                }`}
-              >
-                <Cloud className="w-3.5 h-3.5" />
-                Upload
-              </button>
-              
-              <button
-                type="button"
-                onClick={triggerSyncDownload}
-                disabled={syncStatus === 'syncing' || !isOnline}
-                title="Restore from last saved server backup"
-                className={`flex items-center gap-1.5 py-1 px-2.5 rounded-lg border text-[11px] font-bold shadow-3xs transition-all cursor-pointer ${
-                  !isOnline 
-                    ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
-                    : 'bg-white hover:bg-slate-50 text-slate-705 border-slate-200 hover:border-slate-300'
-                }`}
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
-                Restore
-              </button>
+              {/* Sync trigger buttons */}
+              <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                <button
+                  type="button"
+                  onClick={() => triggerSyncUpload()}
+                  disabled={syncStatus === 'syncing' || !isOnline}
+                  title="Save database immediately to server backup storage"
+                  className={`flex items-center gap-1.5 py-1 px-2 rounded-lg border text-[11px] font-bold shadow-3xs transition-all cursor-pointer ${
+                    !isOnline 
+                      ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                      : 'bg-white hover:bg-slate-50 text-indigo-700 border-indigo-200 hover:border-indigo-300'
+                  }`}
+                >
+                  <Cloud className="w-3.5 h-3.5" />
+                  Upload
+                </button>
+                
+                <button
+                  type="button"
+                  onClick={triggerSyncDownload}
+                  disabled={syncStatus === 'syncing' || !isOnline}
+                  title="Restore from last saved server backup"
+                  className={`flex items-center gap-1.5 py-1 px-2 rounded-lg border text-[11px] font-bold shadow-3xs transition-all cursor-pointer ${
+                    !isOnline 
+                      ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                      : 'bg-white hover:bg-slate-50 text-slate-705 border-slate-200 hover:border-slate-300'
+                  }`}
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
+                  Restore
+                </button>
+              </div>
             </div>
           </div>
 
@@ -8188,50 +9445,55 @@ UG 1083 Child Development Office All Rights Reserved.`;
         <div className="flex border-t border-slate-200 bg-white shadow-3xs">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 w-full flex items-center justify-between gap-4">
             <div className="flex gap-4 sm:gap-6">
-              <button
-                onClick={() => setCurrentTab('tracker')}
-                className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
-                  currentTab === 'tracker'
-                    ? 'border-slate-900 text-slate-900 font-bold'
-                    : 'border-transparent text-slate-400 hover:text-slate-600'
-                }`}
-              >
-                <Users className="w-4 h-4" />
-                Active Student Board
-              </button>
-              <button
-                onClick={() => setCurrentTab('roster-gallery')}
-                className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
-                  currentTab === 'roster-gallery'
-                    ? 'border-slate-900 text-slate-900 font-bold'
-                    : 'border-transparent text-slate-400 hover:text-slate-600'
-                }`}
-              >
-                <LayoutGrid className="w-4 h-4 text-indigo-500" />
-                Roster Gallery
-              </button>
-              <button
-                onClick={() => setCurrentTab('journal')}
-                className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
-                  currentTab === 'journal'
-                    ? 'border-slate-900 text-slate-900 font-bold'
-                    : 'border-transparent text-slate-400 hover:text-slate-600'
-                }`}
-              >
-                <BookOpen className="w-4 h-4 text-emerald-500" />
-                Discussion Journal
-              </button>
-              <button
-                onClick={() => setCurrentTab('ai-analyst')}
-                className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
-                  currentTab === 'ai-analyst'
-                    ? 'border-slate-900 text-slate-900 font-bold'
-                    : 'border-transparent text-slate-400 hover:text-slate-600'
-                }`}
-              >
-                <Sparkles className="w-4 h-4 text-indigo-600 animate-pulse" />
-                AI Roster Analyst
-              </button>
+              {isUserAdmin && (
+                <>
+                  <button
+                    onClick={() => setCurrentTab('tracker')}
+                    className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
+                      currentTab === 'tracker'
+                        ? 'border-slate-900 text-slate-900 font-bold'
+                        : 'border-transparent text-slate-400 hover:text-slate-600'
+                    }`}
+                  >
+                    <Users className="w-4 h-4" />
+                    Active Student Board
+                  </button>
+                  <button
+                    onClick={() => setCurrentTab('roster-gallery')}
+                    className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
+                      currentTab === 'roster-gallery'
+                        ? 'border-slate-900 text-slate-900 font-bold'
+                        : 'border-transparent text-slate-400 hover:text-slate-600'
+                    }`}
+                  >
+                    <LayoutGrid className="w-4 h-4 text-indigo-500" />
+                    Roster Gallery
+                  </button>
+                  <button
+                    onClick={() => setCurrentTab('journal')}
+                    className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
+                      currentTab === 'journal'
+                        ? 'border-slate-900 text-slate-900 font-bold'
+                        : 'border-transparent text-slate-400 hover:text-slate-600'
+                    }`}
+                  >
+                    <BookOpen className="w-4 h-4 text-emerald-500" />
+                    Discussion Journal
+                  </button>
+                  <button
+                    onClick={() => setCurrentTab('ai-analyst')}
+                    className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
+                      currentTab === 'ai-analyst'
+                        ? 'border-slate-900 text-slate-900 font-bold'
+                        : 'border-transparent text-slate-400 hover:text-slate-600'
+                    }`}
+                  >
+                    <Sparkles className="w-4 h-4 text-indigo-600 animate-pulse" />
+                    AI Roster Analyst
+                  </button>
+                </>
+              )}
+              
               <button
                 onClick={() => setCurrentTab('staff-portals')}
                 className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
@@ -8241,131 +9503,136 @@ UG 1083 Child Development Office All Rights Reserved.`;
                 }`}
               >
                 <Activity className="w-4 h-4 text-rose-500 animate-pulse" />
-                Staff Portals
-              </button>
-              <button
-                onClick={() => setCurrentTab('admin')}
-                className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
-                  currentTab === 'admin'
-                    ? 'border-slate-900 text-slate-900 font-bold'
-                    : 'border-transparent text-slate-400 hover:text-slate-600'
-                }`}
-              >
-                <FileCode className="w-4 h-4 text-indigo-500" />
-                Admin Panel & Archives
-              </button>
-            </div>
-
-            {/* Admin Mode Toggle Shield */}
-            <div className="flex items-center gap-2 py-2">
-              {/* Case Welfare Email Alerts Launcher */}
-              <button
-                onClick={() => {
-                  const defaultDate = firstUnemailedFullyMarkedSession?.date || (sessions[0]?.date || null);
-                  setEmailModalSelectedDate(defaultDate);
-                  setIsEmailAlertModalOpen(true);
-                }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-[10.5px] sm:text-xs font-bold shadow-3xs cursor-pointer transition-all ${
-                  firstUnemailedFullyMarkedSession
-                    ? "bg-amber-500/10 border-amber-300 hover:bg-amber-500/20 text-amber-700 animate-pulse"
-                    : "bg-slate-50 border-slate-200 hover:bg-slate-100 text-slate-600"
-                }`}
-                title="Manage Case Alerts Email Dispatches & Settings"
-              >
-                <Mail className="h-3.5 w-3.5" />
-                <span>Email Alerts</span>
-                {firstUnemailedFullyMarkedSession && (
-                  <span className="bg-amber-500 text-slate-950 text-[9px] font-extrabold px-1 py-0.2 rounded font-mono">
-                    PENDING
-                  </span>
-                )}
+                {isUserAdmin ? 'Staff Portals' : 'My Dashboard'}
               </button>
 
-              {isAdminMode ? (
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 text-[10.5px] sm:text-xs font-bold border border-emerald-200 shadow-3xs">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
-                  <span>🛡️ Staff Admin (Unlocked)</span>
-                  <span className="text-emerald-300 pointer-events-none">|</span>
-                  <span className="text-[10px] text-slate-500 font-sans font-medium shrink-0">Operator:</span>
-                  <input
-                    type="text"
-                    placeholder="Enter your name to sign logs..."
-                    value={operatorName}
-                    onChange={(e) => handleUpdateOperatorName(e.target.value)}
-                    className="bg-white border border-emerald-200 rounded px-2 py-0.5 text-[10px] font-bold text-slate-800 w-32 focus:outline-none focus:ring-1 focus:ring-emerald-500 font-sans"
-                    title="Enter your custom name to trace changes in the Security Audit Trail and Transaction Journals"
-                  />
-                  <button 
-                    onClick={() => {
-                      setIsAdminMode(false);
-                      setIsEditingProfile(false);
-                      logSystemAction('audit', 'Admin Session Terminated', `${operatorName.trim() || 'Staff Administrator'} session terminated and status locked down.`, operatorName.trim());
-                    }}
-                    className="ml-1 text-[9.5px] text-emerald-800 hover:text-rose-600 font-extrabold cursor-pointer border-l pl-2 border-emerald-300"
-                    title="Lock Admin Mode"
-                  >
-                    Lock
-                  </button>
-                </div>
-              ) : isPasscodeFieldOpen ? (
-                <form 
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (passcodeAttempt === 'admin1083') {
-                      setIsAdminMode(true);
-                      setPasscodeAttempt('');
-                      setPasscodeError('');
-                      setIsPasscodeFieldOpen(false);
-                      logSystemAction('audit', 'Admin Space Unlocked', 'Privileged Administrator session initiated using verification passcode.', 'Admin Operator');
-                    } else {
-                      setPasscodeError('Invalid Code');
-                      logSystemAction('audit', 'Admin Unlock Failed', 'Unauthorized access warning: incorrect PIN security key entered during validation.', 'Secured Terminal');
-                      setTimeout(() => setPasscodeError(''), 2500);
-                    }
-                  }}
-                  className="flex items-center gap-1 bg-slate-50 border border-indigo-200 rounded-xl p-1"
+              {isUserAdmin && (
+                <button
+                  onClick={() => setCurrentTab('admin')}
+                  className={`py-3 text-xs sm:text-sm font-semibold border-b-2 px-1 transition-all flex items-center gap-2 cursor-pointer ${
+                    currentTab === 'admin'
+                      ? 'border-slate-900 text-slate-900 font-bold'
+                      : 'border-transparent text-slate-400 hover:text-slate-600'
+                  }`}
                 >
-                  <input 
-                    type="password"
-                    placeholder="PIN (admin1083)"
-                    value={passcodeAttempt}
-                    onChange={(e) => setPasscodeAttempt(e.target.value)}
-                    className="bg-white border border-slate-250 rounded-lg px-2 py-0.5 text-[10px] font-semibold text-slate-700 w-24 sm:w-28 focus:outline-none focus:border-indigo-400 placeholder:text-slate-350"
-                  />
-                  <button 
-                    type="submit"
-                    className="bg-indigo-600 text-white rounded-lg px-2 py-0.5 text-[10px] font-bold hover:bg-indigo-700 cursor-pointer"
-                  >
-                    {passcodeError || 'Unlock'}
-                  </button>
-                  <button 
-                    type="button"
-                    onClick={() => {
-                      setIsPasscodeFieldOpen(false);
-                      setPasscodeAttempt('');
-                    }}
-                    className="text-[10px] text-slate-450 hover:text-slate-600 px-1 cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                </form>
-              ) : (
-                <button 
-                  onClick={() => setIsPasscodeFieldOpen(true)}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-50 text-slate-500 hover:text-slate-800 hover:bg-slate-100 text-[10.5px] sm:text-xs font-semibold border border-slate-200 cursor-pointer shadow-3xs transition-all"
-                  title="Unlock Admin Mode (Hint: admin1083)"
-                >
-                  <span>🔒 Admin Lock (Click to Admin)</span>
+                  <FileCode className="w-4 h-4 text-indigo-500" />
+                  Admin Panel & Archives
                 </button>
               )}
             </div>
+
+            {/* Admin Mode Toggle Shield */}
+            {isUserAdmin && (
+              <div className="flex items-center gap-2 py-2">
+                {/* Case Welfare Email Alerts Launcher */}
+                <button
+                  onClick={() => {
+                    const defaultDate = firstUnemailedFullyMarkedSession?.date || (sessions[0]?.date || null);
+                    setEmailModalSelectedDate(defaultDate);
+                    setIsEmailAlertModalOpen(true);
+                  }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-[10.5px] sm:text-xs font-bold shadow-3xs cursor-pointer transition-all ${
+                    firstUnemailedFullyMarkedSession
+                      ? "bg-amber-500/10 border-amber-300 hover:bg-amber-500/20 text-amber-700 animate-pulse"
+                      : "bg-slate-50 border-slate-200 hover:bg-slate-100 text-slate-600"
+                  }`}
+                  title="Manage Case Alerts Email Dispatches & Settings"
+                >
+                  <Mail className="h-3.5 w-3.5" />
+                  <span>Email Alerts</span>
+                  {firstUnemailedFullyMarkedSession && (
+                    <span className="bg-amber-500 text-slate-950 text-[9px] font-extrabold px-1 py-0.2 rounded font-mono">
+                      PENDING
+                    </span>
+                  )}
+                </button>
+
+                {isAdminMode ? (
+                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 text-[10.5px] sm:text-xs font-bold border border-emerald-200 shadow-3xs">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
+                    <span>🛡️ Staff Admin (Unlocked)</span>
+                    <span className="text-emerald-300 pointer-events-none">|</span>
+                    <span className="text-[10px] text-slate-500 font-sans font-medium shrink-0">Operator:</span>
+                    <input
+                      type="text"
+                      placeholder="Enter your name to sign logs..."
+                      value={operatorName}
+                      onChange={(e) => handleUpdateOperatorName(e.target.value)}
+                      className="bg-white border border-emerald-200 rounded px-2 py-0.5 text-[10px] font-bold text-slate-800 w-32 focus:outline-none focus:ring-1 focus:ring-emerald-500 font-sans"
+                      title="Enter your custom name to trace changes in the Security Audit Trail and Transaction Journals"
+                    />
+                    <button 
+                      onClick={() => {
+                        setIsAdminMode(false);
+                        setIsEditingProfile(false);
+                        logSystemAction('audit', 'Admin Session Terminated', `${operatorName.trim() || 'Staff Administrator'} session terminated and status locked down.`, operatorName.trim());
+                      }}
+                      className="ml-1 text-[9.5px] text-emerald-800 hover:text-rose-600 font-extrabold cursor-pointer border-l pl-2 border-emerald-300"
+                      title="Lock Admin Mode"
+                    >
+                      Lock
+                    </button>
+                  </div>
+                ) : isPasscodeFieldOpen ? (
+                  <form 
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (passcodeAttempt === 'admin1083') {
+                        setIsAdminMode(true);
+                        setPasscodeAttempt('');
+                        setPasscodeError('');
+                        setIsPasscodeFieldOpen(false);
+                        logSystemAction('audit', 'Admin Space Unlocked', 'Privileged Administrator session initiated using verification passcode.', 'Admin Operator');
+                      } else {
+                        setPasscodeError('Invalid Code');
+                        logSystemAction('audit', 'Admin Unlock Failed', 'Unauthorized access warning: incorrect PIN security key entered during validation.', 'Secured Terminal');
+                        setTimeout(() => setPasscodeError(''), 2500);
+                      }
+                    }}
+                    className="flex items-center gap-1 bg-slate-50 border border-indigo-200 rounded-xl p-1"
+                  >
+                    <input 
+                      type="password"
+                      placeholder="PIN (admin1083)"
+                      value={passcodeAttempt}
+                      onChange={(e) => setPasscodeAttempt(e.target.value)}
+                      className="bg-white border border-slate-250 rounded-lg px-2 py-0.5 text-[10px] font-semibold text-slate-700 w-24 sm:w-28 focus:outline-none focus:border-indigo-400 placeholder:text-slate-350"
+                    />
+                    <button 
+                      type="submit"
+                      className="bg-indigo-600 text-white rounded-lg px-2 py-0.5 text-[10px] font-bold hover:bg-indigo-700 cursor-pointer"
+                    >
+                      {passcodeError || 'Unlock'}
+                    </button>
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setIsPasscodeFieldOpen(false);
+                        setPasscodeAttempt('');
+                      }}
+                      className="text-[10px] text-slate-450 hover:text-slate-600 px-1 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </form>
+                ) : (
+                  <button 
+                    onClick={() => setIsPasscodeFieldOpen(true)}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-50 text-slate-500 hover:text-slate-800 hover:bg-slate-100 text-[10.5px] sm:text-xs font-semibold border border-slate-200 cursor-pointer shadow-3xs transition-all"
+                    title="Unlock Admin Mode (Hint: admin1083)"
+                  >
+                    <span>🔒 Admin Lock (Click to Admin)</span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </header>
 
       {/* SYSTEM MAIN WORKSPACE */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {currentTab === 'tracker' && (
+        {resolvedTab === 'tracker' && (
           <>
              {/* COMPLETED SESSION ALERT PROMPT BANNER */}
              {isAutomaticEmailEnabled && firstUnemailedFullyMarkedSession && (
@@ -9251,6 +10518,19 @@ UG 1083 Child Development Office All Rights Reserved.`;
                               placeholder="e.g. Workshop Session"
                             />
                           </div>
+
+                          <div>
+                            <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block mb-1">
+                              Session Notes / Summary
+                            </label>
+                            <input
+                              type="text"
+                              value={editSessionNotes}
+                              onChange={(e) => setEditSessionNotes(e.target.value)}
+                              className="w-full px-2.5 py-1.5 text-xs text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-indigo-500"
+                              placeholder="Add daily session notes..."
+                            />
+                          </div>
                         </div>
                       </div>
 
@@ -9258,7 +10538,7 @@ UG 1083 Child Development Office All Rights Reserved.`;
                         <button
                           type="button"
                           onClick={() => {
-                            handleEditSession(day.session!.date, editSessionDate, editSessionLabel);
+                            handleEditSession(day.session!.date, editSessionDate, editSessionLabel, editSessionNotes);
                           }}
                           className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] py-1.5 px-3 rounded-lg shadow-3xs transition-colors cursor-pointer text-center"
                         >
@@ -9299,6 +10579,19 @@ UG 1083 Child Development Office All Rights Reserved.`;
                           <div>
                             <div className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Session Label</div>
                             <div className="font-bold text-slate-800 text-sm mt-0.5">{day.session.label || 'Regular Workshop'}</div>
+                          </div>
+
+                          <div className="mt-2.5">
+                            <label className="text-[9px] text-slate-450 font-bold uppercase tracking-wider block mb-1">
+                              Daily Session Notes
+                            </label>
+                            <input
+                              type="text"
+                              value={day.session.notes || ''}
+                              onChange={(e) => handleUpdateSessionData(day.session!.date, day.session!.checklist, e.target.value)}
+                              placeholder="Add daily notes/summary..."
+                              className="w-full text-[11.5px] px-2.5 py-1.5 text-slate-750 bg-white border border-slate-200 rounded-xl focus:outline-hidden focus:ring-1 focus:ring-indigo-550 focus:border-indigo-550 shadow-3xs"
+                            />
                           </div>
 
                           <div className="bg-white border border-slate-150 rounded-xl p-2.5 space-y-1.5 shadow-3xs mt-2">
@@ -9436,6 +10729,7 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                 setEditingSessionOriginalDate(day.session!.date);
                                 setEditSessionDate(day.session!.date);
                                 setEditSessionLabel(day.session!.label || '');
+                                setEditSessionNotes(day.session!.notes || '');
                               }}
                               className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-2 py-1 rounded-lg text-[10px] font-extrabold cursor-pointer transition-colors border border-indigo-150"
                               title={isAdminMode ? "Edit session date/label details" : "Lock - Enable Admin Mode to edit session"}
@@ -10326,7 +11620,7 @@ UG 1083 Child Development Office All Rights Reserved.`;
           </>
         )}
 
-        {currentTab === 'roster-gallery' && (
+        {resolvedTab === 'roster-gallery' && (
           <div className="space-y-6 animate-fade-in font-sans">
             {/* Header section with admin mode status */}
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900 text-white rounded-3xl p-6 shadow-md relative overflow-hidden">
@@ -10363,8 +11657,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                     onChange={(e) => setGallerySelectedSessionDate(e.target.value)}
                     className="bg-transparent font-bold text-white border-none outline-none focus:ring-0 cursor-pointer text-xs"
                   >
-                    {sessions.map((s) => (
-                      <option key={s.date} value={s.date} className="bg-slate-800 text-white">
+                    {sessions.map((s, idx) => (
+                      <option key={`${s.date}-${idx}`} value={s.date} className="bg-slate-800 text-white">
                         {formatToShortDayMonth(s.date)} {s.label ? `(${s.label})` : ''}
                       </option>
                     ))}
@@ -10651,7 +11945,7 @@ UG 1083 Child Development Office All Rights Reserved.`;
           </div>
         )}
 
-        {currentTab === 'journal' && (() => {
+        {resolvedTab === 'journal' && (() => {
           const allJournalEntries = activeParticipants.flatMap(p => 
             (p.outreachNotes || []).map(log => ({
               participant: p,
@@ -10977,8 +12271,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                 </div>
 
                 <div className="space-y-4">
-                  {budgets.filter(b => b.status === 'Approved').map(budget => (
-                    <div key={budget.id} className="border border-slate-200 hover:border-slate-300 rounded-2xl p-5 bg-slate-50/40 hover:bg-slate-50/75 transition-all shadow-3xs flex flex-col justify-between relative overflow-hidden">
+                  {budgets.filter(b => b.status === 'Approved').map((budget, bIdx) => (
+                    <div key={`approved-bgt-${budget.id || bIdx}-${bIdx}`} className="border border-slate-200 hover:border-slate-300 rounded-2xl p-5 bg-slate-50/40 hover:bg-slate-50/75 transition-all shadow-3xs flex flex-col justify-between relative overflow-hidden">
                       {/* Status indicator strip */}
                       <div className="absolute top-0 left-0 right-0 h-1 bg-emerald-500" />
 
@@ -11062,7 +12356,7 @@ UG 1083 Child Development Office All Rights Reserved.`;
           );
         })()}
 
-        {currentTab === 'ai-analyst' && (
+        {resolvedTab === 'ai-analyst' && (
           <div className="space-y-6">
             {/* AI ANALYST WELCOME BANNER */}
             <div className="bg-gradient-to-r from-indigo-900 via-purple-950 to-indigo-900 border border-slate-200/10 rounded-3xl p-6 sm:p-8 text-white relative overflow-hidden shadow-md">
@@ -11598,7 +12892,7 @@ UG 1083 Child Development Office All Rights Reserved.`;
           </div>
         )}
 
-        {currentTab === 'staff-portals' && (
+        {resolvedTab === 'staff-portals' && (
           <CdoStaffPortals
             participants={participants}
             setParticipants={setParticipants}
@@ -11612,11 +12906,24 @@ UG 1083 Child Development Office All Rights Reserved.`;
             auditTrailLogs={systemLogs}
             budgets={budgets}
             setBudgets={setBudgets}
+            pettyCashRequests={pettyCashRequests}
+            setPettyCashRequests={setPettyCashRequests}
+            performanceCycles={performanceCycles}
+            setPerformanceCycles={setPerformanceCycles}
             isAdminMode={isAdminMode}
+            userRole={userRole}
+            monthlyJournals={monthlyJournals}
+            setMonthlyJournals={setMonthlyJournals}
+            annualTargetsJournals={annualTargetsJournals}
+            setAnnualTargetsJournals={setAnnualTargetsJournals}
+            monthlyPerformanceTargets={monthlyPerformanceTargets}
+            setMonthlyPerformanceTargets={setMonthlyPerformanceTargets}
+            closedMonthlyPerformanceJournals={closedMonthlyPerformanceJournals}
+            setClosedMonthlyPerformanceJournals={setClosedMonthlyPerformanceJournals}
           />
         )}
 
-        {currentTab === 'admin' && (
+        {resolvedTab === 'admin' && (
           <div className="space-y-6">
             {/* ADMIN WELCOME BANNER */}
             <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 text-white relative overflow-hidden shadow-md">
@@ -12264,12 +13571,24 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   placeholder="Session Name"
                                 />
                               </div>
+                              <div>
+                                <label className="text-[9px] text-slate-500 font-bold uppercase block mb-0.5">
+                                  Session Notes / Summary
+                                </label>
+                                <input
+                                  type="text"
+                                  value={editSessionNotes}
+                                  onChange={(e) => setEditSessionNotes(e.target.value)}
+                                  className="w-full px-2.5 py-1.5 text-xs text-slate-800 bg-white border border-slate-250 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-indigo-500 shadow-2xs"
+                                  placeholder="Session Notes"
+                                />
+                              </div>
                             </div>
                             <div className="flex gap-2 pt-2 border-t border-slate-150">
                               <button
                                 type="button"
                                 onClick={() => {
-                                  handleEditSession(s.date, editSessionDate, editSessionLabel);
+                                  handleEditSession(s.date, editSessionDate, editSessionLabel, editSessionNotes);
                                 }}
                                 className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[10px] py-1.5 rounded-lg shadow-3xs cursor-pointer text-center"
                               >
@@ -12298,6 +13617,19 @@ UG 1083 Child Development Office All Rights Reserved.`;
                               <h4 className="text-xs font-bold text-slate-800 mt-2 truncate max-w-[170px]" title={s.label}>
                                 {s.label}
                               </h4>
+
+                              <div className="mt-2.5">
+                                <label className="text-[9px] text-slate-450 font-bold uppercase tracking-wider block mb-1">
+                                  Daily Session Notes
+                                </label>
+                                <input
+                                  type="text"
+                                  value={s.notes || ''}
+                                  onChange={(e) => handleUpdateSessionData(s.date, s.checklist, e.target.value)}
+                                  placeholder="Add daily notes/summary..."
+                                  className="w-full text-[11.5px] px-2.5 py-1.5 text-slate-750 bg-white border border-slate-200 rounded-xl focus:outline-hidden focus:ring-1 focus:ring-indigo-550 focus:border-indigo-550 shadow-3xs"
+                                />
+                              </div>
                             </div>
 
                             <div className="flex items-center justify-between border-t border-slate-150 pt-2 mt-1">
@@ -12323,6 +13655,7 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                     setEditingSessionOriginalDate(s.date);
                                     setEditSessionDate(s.date);
                                     setEditSessionLabel(s.label);
+                                    setEditSessionNotes(s.notes || '');
                                   }}
                                   className="text-[11px] text-indigo-600 hover:text-indigo-805 hover:underline font-bold cursor-pointer"
                                 >
@@ -12803,6 +14136,171 @@ UG 1083 Child Development Office All Rights Reserved.`;
 
             </div>
 
+            {/* SYSTEM USER ACCOUNTS & PRIVILEGED ACCESS DIRECTORY */}
+            <div className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-2xs mt-6 flex flex-col">
+              <div className="p-5 border-b border-slate-150 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 bg-indigo-50 rounded-lg text-indigo-750">
+                    <Users className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">System User Accounts</h3>
+                    <p className="text-xs text-slate-500 mt-0.5 font-sans">Manage registered staff and their roles for verification code logins.</p>
+                  </div>
+                </div>
+                <span className="text-xs bg-indigo-50 text-indigo-700 font-bold px-2.5 py-1 rounded-full shrink-0">
+                  {adminUsers.length} Users Enrolled
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-slate-150">
+                
+                {/* Left Column: Create User Account Form */}
+                <div className="lg:col-span-5 p-6 space-y-4">
+                  <div>
+                    <h4 className="text-xs font-extrabold text-slate-900 uppercase tracking-wide mb-1">
+                      Register Staff Account
+                    </h4>
+                    <p className="text-[11px] text-slate-500 leading-normal font-sans">
+                      Enter the email address of the employee/staff member. They will be registered as a valid system user and can log in securely via verification codes.
+                    </p>
+                  </div>
+
+                  <form onSubmit={handleCreateAdminUser} className="space-y-3.5">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">
+                        Staff Email Address
+                      </label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                          <Mail className="h-4 w-4 text-slate-400" />
+                        </div>
+                        <input
+                          type="email"
+                          value={newUserEmail}
+                          onChange={(e) => setNewUserEmail(e.target.value)}
+                          placeholder="e.g. staff.member@cydc.org"
+                          className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-250 rounded-xl text-xs font-semibold text-slate-800 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs"
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">
+                        Assigned Role & Dashboard Access
+                      </label>
+                      <select
+                        value={newUserRole}
+                        onChange={(e) => setNewUserRole(e.target.value)}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-250 rounded-xl text-xs font-semibold text-slate-850 focus:outline-hidden focus:border-indigo-500 focus:bg-white transition-all shadow-2xs cursor-pointer"
+                      >
+                        <option value="CDO HEALTH">CDO Health Dashboard</option>
+                        <option value="CDO SDR">CDO Sponsor Relations Dashboard</option>
+                        <option value="CDO HBP">CDO Home-Based Program Dashboard</option>
+                        <option value="PROJECT DIRECTOR">Project Director Dashboard</option>
+                        <option value="ADMINISTRATOR">Administrator (Full Access)</option>
+                        <option value="OVERSEER">Church Overseer Desk</option>
+                        <option value="OFFICIAL JOURNALS">Archival Journals Dashboard</option>
+                      </select>
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={isAdminUsersLoading}
+                      className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs py-2.5 px-4 rounded-xl cursor-pointer transition-all shadow-xs hover:shadow-md flex items-center justify-center gap-1.5"
+                    >
+                      {isAdminUsersLoading ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Processing...</span>
+                        </>
+                      ) : (
+                        <>
+                          <UserPlus className="w-3.5 h-3.5 text-indigo-200" />
+                          <span>Provision User Account</span>
+                        </>
+                      )}
+                    </button>
+                  </form>
+
+                  {adminUsersError && (
+                    <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-left">
+                      <p className="text-[10.5px] text-rose-600 font-semibold font-sans leading-relaxed">
+                        ⚠️ {adminUsersError}
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="bg-slate-50 border border-slate-150 rounded-xl p-3.5 text-left space-y-1">
+                    <h5 className="text-[10.5px] font-bold text-slate-850 flex items-center gap-1">
+                      ℹ️ One-Time Password Policy
+                    </h5>
+                    <p className="text-[10px] text-slate-500 leading-normal font-sans">
+                      Once created, the staff member can navigate to the login portal, enter their registered email, and log in securely with the OTP code. No password management is required.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Right Column: Registered Users Directory */}
+                <div className="lg:col-span-7 flex flex-col divide-y divide-slate-100 bg-slate-50/15">
+                  <div className="p-4 bg-slate-50/30 text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between">
+                    <span>Enrolled Staff Accounts</span>
+                    <span>Action</span>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto max-h-[360px] divide-y divide-slate-100">
+                    {isAdminUsersLoading && adminUsers.length === 0 ? (
+                      <div className="p-8 text-center text-xs text-slate-400 font-sans animate-pulse">
+                        Synchronizing user directory database...
+                      </div>
+                    ) : adminUsers.length === 0 ? (
+                      <div className="p-12 text-center text-slate-400 italic text-xs font-sans flex flex-col items-center justify-center">
+                        <Users className="w-8 h-8 text-slate-300 mb-2" />
+                        No staff user accounts registered yet. Use the left-side form to register the first account.
+                      </div>
+                    ) : (
+                      adminUsers.map((u, idx) => (
+                        <div key={`admin-usr-${u.id || idx}-${u.uid || idx}`} className="p-4 hover:bg-slate-50/60 transition-all flex items-center justify-between gap-4 text-xs font-sans">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-extrabold text-slate-900 truncate" title={u.email}>
+                                {u.email}
+                              </span>
+                              <span className="text-[9px] font-extrabold px-1.5 py-0.2 bg-indigo-50 border border-indigo-100 text-indigo-700 rounded-md uppercase tracking-wide">
+                                {u.role}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-1 font-mono">
+                              UID: {u.uid.slice(0, 12)}... • Registered: {u.createdAt ? new Date(u.createdAt).toLocaleDateString() : 'N/A'}
+                            </div>
+                          </div>
+
+                          <div className="shrink-0">
+                            {currentUser?.email === u.email ? (
+                              <span className="text-[10px] text-slate-400 font-semibold italic bg-slate-100 px-2 py-1 rounded-lg">
+                                Current User
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handleDeleteAdminUser(u.id)}
+                                disabled={isAdminUsersLoading}
+                                className="p-2 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors cursor-pointer"
+                                title="Revoke all system access immediately"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
           </div>
         )}
       </main>
@@ -13033,54 +14531,132 @@ UG 1083 Child Development Office All Rights Reserved.`;
                       </div>
                     </div>
 
-                    {/* Drag and Drop Dropzone */}
-                    <div
-                      onDragOver={(e) => { e.preventDefault(); setScanDragActive(true); }}
-                      onDragLeave={() => setScanDragActive(false)}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        setScanDragActive(false);
-                        const file = e.dataTransfer.files?.[0];
-                        if (file) {
-                          const reader = new FileReader();
-                          reader.onload = () => {
-                            setScannedFilePreview(reader.result as string);
-                            setScanUploadedFileName(file.name);
-                            setScanError(null);
-                          };
-                          reader.readAsDataURL(file);
-                        }
-                      }}
-                      className={`border-2 border-dashed rounded-xl p-4 flex flex-col items-center justify-center gap-1 text-center transition-all ${
-                        scanDragActive ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 bg-slate-50'
-                      }`}
-                    >
-                      <input
-                        type="file"
-                        accept="image/*"
-                        id="form-image-uploader"
-                        className="hidden"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (file) {
-                            const reader = new FileReader();
-                            reader.onload = () => {
-                              setScannedFilePreview(reader.result as string);
-                              setScanUploadedFileName(file.name);
-                              setScanError(null);
-                            };
-                            reader.readAsDataURL(file);
-                          }
-                        }}
-                      />
-                      <label htmlFor="form-image-uploader" className="flex flex-col items-center justify-center cursor-pointer space-y-1.5 w-full">
-                        <Upload className="w-6 h-6 text-slate-400" />
-                        <span className="text-[11px] font-medium text-slate-700 hover:text-indigo-600 block">
-                          Drag scanned image or <span className="text-indigo-600 font-bold hover:underline">browse files</span>
-                        </span>
-                        <span className="text-[9px] text-slate-400 block">Supports JPEG, PNG formats</span>
-                      </label>
-                    </div>
+                    {/* Camera view or Drag-and-Drop Dropzone */}
+                    {isDocCameraActive ? (
+                      <div className="border-2 border-indigo-600/50 bg-slate-900 rounded-xl overflow-hidden p-3.5 flex flex-col items-center justify-center gap-3 text-center relative animate-fade-in shadow-inner min-h-[220px]">
+                        {/* Live Camera Feed */}
+                        <div className="relative w-full aspect-video max-h-[300px] bg-black rounded-lg overflow-hidden flex items-center justify-center shadow-md">
+                          <video
+                            ref={docVideoRef}
+                            autoPlay
+                            playsInline
+                            className="w-full h-full object-cover"
+                          />
+                          {/* Visual document viewfinder overlay guide */}
+                          <div className="absolute inset-4 border-2 border-dashed border-white/40 pointer-events-none rounded-md flex items-center justify-center">
+                            <span className="text-[9px] text-white/50 bg-black/60 px-2 py-0.5 rounded font-mono uppercase tracking-wider">Align document in frame</span>
+                          </div>
+                        </div>
+
+                        {/* Camera controls */}
+                        <div className="w-full space-y-2">
+                          {docCameraDevices.length > 1 && (
+                            <div className="flex items-center justify-center gap-1.5 text-[10px]">
+                              <span className="text-slate-400 font-bold font-mono">Camera Device:</span>
+                              <select
+                                value={selectedDocCameraId}
+                                onChange={(e) => startDocCamera(e.target.value)}
+                                className="bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-white text-[10px] font-medium max-w-[180px] focus:outline-none cursor-pointer"
+                              >
+                                {docCameraDevices.map((device, dIdx) => (
+                                  <option key={`doc-cam-${device.deviceId || 'cam'}-${dIdx}`} value={device.deviceId}>
+                                    {device.label || `Camera ${dIdx + 1}`}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+
+                          <div className="flex gap-2 justify-center">
+                            <button
+                              type="button"
+                              onClick={captureDocPhoto}
+                              className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[11.5px] rounded-xl cursor-pointer transition-all flex items-center gap-1.5 hover:scale-102"
+                            >
+                              <Camera className="w-4 h-4 text-amber-300 animate-pulse" />
+                              <span>Capture Photo</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={stopDocCamera}
+                              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 font-bold text-[11px] rounded-xl cursor-pointer transition-all"
+                            >
+                              <span>Cancel</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {/* Drag and Drop Dropzone */}
+                        <div
+                          onDragOver={(e) => { e.preventDefault(); setScanDragActive(true); }}
+                          onDragLeave={() => setScanDragActive(false)}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            setScanDragActive(false);
+                            const file = e.dataTransfer.files?.[0];
+                            if (file) {
+                              const reader = new FileReader();
+                              reader.onload = () => {
+                                setScannedFilePreview(reader.result as string);
+                                setScanUploadedFileName(file.name);
+                                setScanError(null);
+                              };
+                              reader.readAsDataURL(file);
+                            }
+                          }}
+                          className={`border-2 border-dashed rounded-xl p-4 flex flex-col items-center justify-center gap-1 text-center transition-all ${
+                            scanDragActive ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 bg-slate-50'
+                          }`}
+                        >
+                          <input
+                            type="file"
+                            accept="image/*"
+                            id="form-image-uploader"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = () => {
+                                  setScannedFilePreview(reader.result as string);
+                                  setScanUploadedFileName(file.name);
+                                  setScanError(null);
+                                };
+                                reader.readAsDataURL(file);
+                              }
+                            }}
+                          />
+                          <label htmlFor="form-image-uploader" className="flex flex-col items-center justify-center cursor-pointer space-y-1.5 w-full">
+                            <Upload className="w-6 h-6 text-slate-400" />
+                            <span className="text-[11px] font-medium text-slate-700 hover:text-indigo-600 block">
+                              Drag scanned image or <span className="text-indigo-600 font-bold hover:underline">browse files</span>
+                            </span>
+                            <span className="text-[9px] text-slate-400 block">Supports JPEG, PNG formats</span>
+                          </label>
+                        </div>
+
+                        {/* Camera Quick Toggle Button */}
+                        <button
+                          type="button"
+                          onClick={() => startDocCamera()}
+                          className="w-full py-2 bg-indigo-50 hover:bg-indigo-100 border border-dashed border-indigo-200 hover:border-indigo-300 text-indigo-700 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-3xs"
+                        >
+                          <Camera className="w-3.5 h-3.5 text-indigo-600 animate-pulse" />
+                          <span>Use Live Device Camera to Scan Document</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {docCameraError && (
+                      <div className="p-2 bg-rose-50 border border-rose-150 rounded-xl flex items-start gap-1.5 text-rose-700 text-[10px] leading-snug animate-fade-in">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-rose-500 mt-0.5" />
+                        <div>
+                          <span className="font-bold">Camera Initialization Impediment:</span> {docCameraError}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Selected File Preview */}
                     {scannedFilePreview && (
@@ -13564,89 +15140,247 @@ UG 1083 Child Development Office All Rights Reserved.`;
                         </p>
                       </div>
                     </div>
-                  ) : capturedPhotoPreview ? (
-                    <div className="space-y-4">
-                      {/* Photo Captured & Cropped Preview */}
-                      <div className="text-center space-y-1.5">
-                        <span className="text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-250 px-2.5 py-1 rounded-full font-bold uppercase inline-block leading-none">
-                          ✨ Centered Automatically (Facial Centroid)
-                        </span>
-                        
-                        <div className="relative w-full aspect-square max-w-[185px] mx-auto bg-slate-905 rounded-2xl border border-indigo-300 overflow-hidden shadow-md">
-                          <img 
-                            src={capturedPhotoPreview.finalUrl} 
-                            alt="Cropped Preview" 
-                            className="w-full h-full object-cover" 
-                            referrerPolicy="no-referrer" 
-                          />
+                  ) : capturedPhotoPreview ? (() => {
+                    const scaleX = cropperDimensions.width ? (cropperDimensions.width / (capturedPhotoPreview.width || 1)) : 1;
+                    const scaleY = cropperDimensions.height ? (cropperDimensions.height / (capturedPhotoPreview.height || 1)) : 1;
+                    const displayX = (capturedPhotoPreview.cropBox?.x || 0) * scaleX;
+                    const displayY = (capturedPhotoPreview.cropBox?.y || 0) * scaleY;
+                    const displaySize = (capturedPhotoPreview.cropBox?.size || 320) * scaleX;
+
+                    return (
+                      <div className="space-y-4">
+                        {/* Interactive Cropper vs Live Preview Grid */}
+                        <div className="flex flex-col sm:flex-row gap-4 items-center justify-center">
+                          
+                          {/* Cropper Base Canvas Box */}
+                          <div className="space-y-1.5 w-full max-w-[240px]">
+                            <span className="text-[9.5px] text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full font-bold uppercase inline-block leading-none">
+                              📸 Interactive Crop Zone
+                            </span>
+                            
+                            <div className="relative w-full aspect-square max-w-[240px] mx-auto border border-slate-250 bg-slate-900 rounded-2xl overflow-hidden select-none" style={{ touchAction: 'none' }}>
+                              <img
+                                ref={cropperImageRef}
+                                src={capturedPhotoPreview.rawUrl}
+                                alt="Cropping Base"
+                                className="w-full h-auto block select-none pointer-events-none"
+                                onLoad={handleCropperImageLoad}
+                                draggable={false}
+                              />
+                              
+                              {/* Spotlight Mask layer */}
+                              <div className="absolute inset-0 pointer-events-none overflow-hidden">
+                                {cropperDimensions.width > 0 && (
+                                  <div
+                                    className="absolute border-2 border-indigo-500 cursor-move pointer-events-auto rounded-xl shadow-[0_0_0_9999px_rgba(15,23,42,0.65)]"
+                                    style={{
+                                      left: `${displayX}px`,
+                                      top: `${displayY}px`,
+                                      width: `${displaySize}px`,
+                                      height: `${displaySize}px`,
+                                    }}
+                                    onMouseDown={handleCropDragStart}
+                                    onTouchStart={handleCropDragStart}
+                                  >
+                                    {/* Grid Guides */}
+                                    <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none opacity-20">
+                                      <div className="border-r border-dashed border-white"></div>
+                                      <div className="border-r border-dashed border-white"></div>
+                                      <div></div>
+                                      <div className="border-b border-dashed border-white col-span-3"></div>
+                                      <div className="border-b border-dashed border-white col-span-3"></div>
+                                    </div>
+
+                                    {/* Draggable corners */}
+                                    <div
+                                      className="absolute -top-1 -left-1 w-3 h-3 bg-indigo-600 border border-white rounded-full cursor-nwse-resize shadow-xs"
+                                      onMouseDown={(e) => handleResizeDragStart(e, 'top-left')}
+                                      onTouchStart={(e) => handleResizeDragStart(e, 'top-left')}
+                                    />
+                                    <div
+                                      className="absolute -top-1 -right-1 w-3 h-3 bg-indigo-600 border border-white rounded-full cursor-nesw-resize shadow-xs"
+                                      onMouseDown={(e) => handleResizeDragStart(e, 'top-right')}
+                                      onTouchStart={(e) => handleResizeDragStart(e, 'top-right')}
+                                    />
+                                    <div
+                                      className="absolute -bottom-1 -left-1 w-3 h-3 bg-indigo-600 border border-white rounded-full cursor-nesw-resize shadow-xs"
+                                      onMouseDown={(e) => handleResizeDragStart(e, 'bottom-left')}
+                                      onTouchStart={(e) => handleResizeDragStart(e, 'bottom-left')}
+                                    />
+                                    <div
+                                      className="absolute -bottom-1 -right-1 w-3 h-3 bg-indigo-600 border border-white rounded-full cursor-nwse-resize shadow-xs"
+                                      onMouseDown={(e) => handleResizeDragStart(e, 'bottom-right')}
+                                      onTouchStart={(e) => handleResizeDragStart(e, 'bottom-right')}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Resulting Live Portrait Preview Card */}
+                          <div className="space-y-1.5 w-full max-w-[180px] flex flex-col items-center">
+                            <span className="text-[9.5px] text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full font-bold uppercase inline-block leading-none">
+                              ✨ Live Portrait
+                            </span>
+                            
+                            <div className="relative w-full aspect-square max-w-[150px] bg-slate-900 rounded-2xl border border-indigo-250 overflow-hidden shadow-xs">
+                              <img 
+                                src={capturedPhotoPreview.finalUrl} 
+                                alt="Cropped Output" 
+                                className="w-full h-full object-cover" 
+                                referrerPolicy="no-referrer" 
+                              />
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={resetToAutoCrop}
+                              className="inline-flex items-center gap-1 text-[9px] px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg font-bold transition-all cursor-pointer shadow-3xs"
+                            >
+                              <RefreshCw className="w-2.5 h-2.5" />
+                              Reset Auto Centering
+                            </button>
+                          </div>
+
+                        </div>
+
+                        {/* Precision Position & Size Range Sliders */}
+                        <div className="bg-slate-100/50 p-3 rounded-xl border border-slate-200/80 space-y-2 text-xs text-slate-700">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-slate-500 font-mono uppercase font-bold tracking-wider">
+                              Manual Alignment Tweaks
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            {/* Size Slider */}
+                            <div className="space-y-0.5">
+                              <div className="flex justify-between text-[9.5px] font-medium text-slate-500 font-mono">
+                                <span>Scale / Zoom</span>
+                                <span>{Math.round(capturedPhotoPreview.cropBox.size)}px</span>
+                              </div>
+                              <input
+                                type="range"
+                                min={64}
+                                max={Math.min(capturedPhotoPreview.width, capturedPhotoPreview.height)}
+                                value={capturedPhotoPreview.cropBox.size}
+                                onChange={(e) => {
+                                  const sizeVal = Number(e.target.value);
+                                  const newX = Math.min(capturedPhotoPreview.cropBox.x, capturedPhotoPreview.width - sizeVal);
+                                  const newY = Math.min(capturedPhotoPreview.cropBox.y, capturedPhotoPreview.height - sizeVal);
+                                  updatePhotoCrop({ x: newX, y: newY, size: sizeVal });
+                                }}
+                                className="w-full accent-indigo-600 h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer"
+                              />
+                            </div>
+
+                            {/* X Slider */}
+                            <div className="space-y-0.5">
+                              <div className="flex justify-between text-[9.5px] font-medium text-slate-500 font-mono">
+                                <span>Horizontal Pan</span>
+                                <span>{Math.round(capturedPhotoPreview.cropBox.x)}px</span>
+                              </div>
+                              <input
+                                type="range"
+                                min={0}
+                                max={capturedPhotoPreview.width - capturedPhotoPreview.cropBox.size}
+                                value={capturedPhotoPreview.cropBox.x}
+                                onChange={(e) => {
+                                  const xVal = Number(e.target.value);
+                                  updatePhotoCrop({ ...capturedPhotoPreview.cropBox, x: xVal });
+                                }}
+                                className="w-full accent-indigo-600 h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer"
+                              />
+                            </div>
+
+                            {/* Y Slider */}
+                            <div className="space-y-0.5">
+                              <div className="flex justify-between text-[9.5px] font-medium text-slate-500 font-mono">
+                                <span>Vertical Pan</span>
+                                <span>{Math.round(capturedPhotoPreview.cropBox.y)}px</span>
+                              </div>
+                              <input
+                                type="range"
+                                min={0}
+                                max={capturedPhotoPreview.height - capturedPhotoPreview.cropBox.size}
+                                value={capturedPhotoPreview.cropBox.y}
+                                onChange={(e) => {
+                                  const yVal = Number(e.target.value);
+                                  updatePhotoCrop({ ...capturedPhotoPreview.cropBox, y: yVal });
+                                }}
+                                className="w-full accent-indigo-600 h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer"
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Photo Filters Choice list */}
+                        <div className="space-y-1 bg-slate-100/50 p-2 rounded-xl border border-slate-205">
+                          <label className="text-[10px] text-slate-500 font-mono uppercase block font-bold tracking-wider">
+                            Apply Portrait Filter
+                          </label>
+                          <div className="grid grid-cols-3 gap-1 text-[9.5px]">
+                            {(['none', 'grayscale', 'vintage', 'dramatic', 'warm', 'cool'] as const).map(f => {
+                              let label = 'None';
+                              if (f === 'grayscale') label = 'BW Normal';
+                              if (f === 'vintage') label = 'Vintage';
+                              if (f === 'dramatic') label = 'BW Drama';
+                              if (f === 'warm') label = 'Golden';
+                              if (f === 'cool') label = 'Jade';
+
+                              return (
+                                <button
+                                  key={f}
+                                  type="button"
+                                  onClick={() => applyFilterToPhoto(f)}
+                                  className={`py-0.5 px-1.5 border rounded-lg font-medium text-center transition-all cursor-pointer truncate ${
+                                    selectedPhotoFilter === f
+                                      ? 'bg-indigo-600 border-indigo-700 text-white font-bold'
+                                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  {label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* Control buttons */}
+                        <div className="flex items-center justify-center gap-2 pt-2.5 border-t border-slate-150">
+                          <button
+                            type="button"
+                            onClick={() => saveCapturedPhoto(inspectedParticipant.id)}
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1 shadow-2xs"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            Save Photo
+                          </button>
+                          
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCapturedPhotoPreview(null);
+                              setSelectedPhotoFilter('none');
+                            }}
+                            className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1"
+                          >
+                            <Camera className="w-3.5 h-3.5" />
+                            Re-take
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={stopCamera}
+                            className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-500 text-xs font-medium rounded-xl transition-all cursor-pointer ml-auto"
+                          >
+                            Close
+                          </button>
                         </div>
                       </div>
-
-                      {/* Photo Filters Choice list */}
-                      <div className="space-y-1.5 bg-slate-100/50 p-2.5 rounded-xl border border-slate-205">
-                        <label className="text-[10.5px] text-slate-500 font-mono uppercase block font-bold tracking-wider">
-                          Apply Portrait Filter
-                        </label>
-                        <div className="grid grid-cols-3 gap-1.5 text-[10px]">
-                          {(['none', 'grayscale', 'vintage', 'dramatic', 'warm', 'cool'] as const).map(f => {
-                            let label = 'None';
-                            if (f === 'grayscale') label = 'BW Normal';
-                            if (f === 'vintage') label = 'Vintage';
-                            if (f === 'dramatic') label = 'BW Drama';
-                            if (f === 'warm') label = 'Golden';
-                            if (f === 'cool') label = 'Jade';
-
-                            return (
-                              <button
-                                key={f}
-                                type="button"
-                                onClick={() => applyFilterToPhoto(f)}
-                                className={`py-1 px-2 border rounded-lg font-medium text-center transition-all cursor-pointer truncate ${
-                                  selectedPhotoFilter === f
-                                    ? 'bg-indigo-600 border-indigo-700 text-white font-bold'
-                                    : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                                }`}
-                              >
-                                {label}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Control buttons */}
-                      <div className="flex items-center justify-center gap-2 pt-2.5 border-t border-slate-150">
-                        <button
-                          type="button"
-                          onClick={() => saveCapturedPhoto(inspectedParticipant.id)}
-                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1 shadow-2xs"
-                        >
-                          <Check className="w-3.5 h-3.5" />
-                          Save Photo
-                        </button>
-                        
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setCapturedPhotoPreview(null);
-                            setSelectedPhotoFilter('none');
-                          }}
-                          className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1"
-                        >
-                          <Camera className="w-3.5 h-3.5" />
-                          Re-take
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={stopCamera}
-                          className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-500 text-xs font-medium rounded-xl transition-all cursor-pointer ml-auto"
-                        >
-                          Close
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
+                    );
+                  })() : (
                     <div className="space-y-3">
                       {/* Live Camera View Finder with guidance overlay */}
                       <div className="relative w-full aspect-square max-w-[240px] mx-auto bg-slate-900 rounded-2xl border border-indigo-550 overflow-hidden shadow-inner flex items-center justify-center">
@@ -14556,170 +16290,320 @@ UG 1083 Child Development Office All Rights Reserved.`;
 
                   {smsAccordionExpanded && (
                     <div className="space-y-3 bg-white border border-slate-200/80 rounded-xl p-3.5 shadow-2xs">
-                      {/* Campaign Selection */}
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        <div className="space-y-1">
-                          <label className="text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono block">Outreach Campaign</label>
-                          <select
-                            value={smsCampaignType}
-                            onChange={(e) => setSmsCampaignType(e.target.value as any)}
-                            className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs py-1.5 px-2 text-slate-705 font-bold focus:outline-none cursor-pointer"
-                          >
-                            <option value="absenteeism">⚠️ Absenteeism Warning</option>
-                            <option value="praise">🎉 Attendance Praise</option>
-                            <option value="home_visit">🏡 Home Visit Proposal</option>
-                            <option value="medical">🏥 Medical Follow-up</option>
-                            <option value="academic">🏫 Academic Check-in</option>
-                          </select>
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono block">Tone & Disposition</label>
-                          <select
-                            value={smsTone}
-                            onChange={(e) => setSmsTone(e.target.value as any)}
-                            className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs py-1.5 px-2 text-slate-705 font-bold focus:outline-none cursor-pointer"
-                          >
-                            <option value="polite">🤝 Polite & Direct</option>
-                            <option value="urgent">📢 Urgent & Actionable</option>
-                            <option value="collaborative">❤️ Warm & Collaborative</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      {/* Optional Context */}
-                      <div className="space-y-1">
-                        <label className="text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono block">Additional Caseworker Context (Optional)</label>
-                        <input
-                          type="text"
-                          value={smsExtraContext}
-                          onChange={(e) => setSmsExtraContext(e.target.value)}
-                          placeholder="e.g., mention medical rest, ask about road conditions, include family prayer request..."
-                          className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs focus:outline-none focus:border-indigo-500 placeholder:text-slate-400"
-                        />
-                      </div>
-
-                      {/* Action buttons */}
-                      <div className="flex gap-2">
+                      {/* SMS Hub Tab Switcher */}
+                      <div className="flex border-b border-slate-200 mb-2">
                         <button
                           type="button"
-                          onClick={handleGenerateSmsWithGemini}
-                          disabled={isSmsGenerating}
-                          className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[10.5px] py-2 px-3 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                          onClick={() => setSmsHubActiveTab('compose')}
+                          className={`flex items-center gap-1.5 px-4 py-2 text-xs font-bold border-b-2 cursor-pointer transition-all ${
+                            smsHubActiveTab === 'compose'
+                              ? 'border-indigo-600 text-indigo-700 font-extrabold'
+                              : 'border-transparent text-slate-500 hover:text-slate-800'
+                          }`}
                         >
-                          {isSmsGenerating ? (
-                            <>
-                              <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                              <span>Optimizing with Gemini...</span>
-                            </>
-                          ) : (
-                            <>
-                              <Sparkles className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
-                              <span>✨ Optimize Message with Gemini AI</span>
-                            </>
-                          )}
+                          <MessageSquare className="w-3.5 h-3.5" />
+                          <span>Compose Outreach SMS</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSmsHubActiveTab('history')}
+                          className={`flex items-center gap-1.5 px-4 py-2 text-xs font-bold border-b-2 cursor-pointer transition-all ${
+                            smsHubActiveTab === 'history'
+                              ? 'border-indigo-600 text-indigo-700 font-extrabold'
+                              : 'border-transparent text-slate-500 hover:text-slate-800'
+                          }`}
+                        >
+                          <History className="w-3.5 h-3.5" />
+                          <span>Sent Outreach History</span>
+                          <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded-full font-bold ml-1">
+                            {allSentSmsLogs.length}
+                          </span>
                         </button>
                       </div>
 
-                      {/* Display draft message */}
-                      <div className="space-y-1 pt-1">
-                        <div className="flex items-center justify-between text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono">
-                          <span>SMS Copy Draft Preview</span>
-                          <span>{smsDraftMessage.length} characters</span>
-                        </div>
-                        <div className="relative">
-                          <textarea
-                            value={smsDraftMessage}
-                            onChange={(e) => setSmsDraftMessage(e.target.value)}
-                            rows={4}
-                            className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-700 leading-relaxed font-sans placeholder:text-slate-400 focus:outline-none focus:border-slate-350"
-                          />
-                        </div>
-                      </div>
-
-                      {/* Success / Status Info */}
-                      {smsSuccessMsg && (
-                        <div className="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg p-1.5 px-2.5 text-center transition-all animate-fade-in animate-duration-300">
-                          {smsSuccessMsg}
-                        </div>
-                      )}
-
-                      {/* Africa's Talking API Dispatch Status */}
-                      {directSmsResponse && (
-                        <div className={`p-2.5 rounded-xl border text-[10.5px] font-bold transition-all ${
-                          directSmsResponse.success 
-                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
-                            : 'bg-rose-50 border-rose-200 text-rose-800'
-                        }`}>
-                          <div className="flex items-start gap-2">
-                            {directSmsResponse.success ? (
-                              <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                            ) : (
-                              <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
-                            )}
+                      {/* COMPOSE TAB */}
+                      {smsHubActiveTab === 'compose' && (
+                        <div className="space-y-3 animate-fade-in">
+                          {/* Campaign Selection */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                             <div className="space-y-1">
-                              <p className="leading-snug">{directSmsResponse.message}</p>
-                              {directSmsResponse.isSimulated && (
-                                <p className="text-[9.5px] text-indigo-700 font-normal leading-relaxed">
-                                  💡 <b>Credentials Setup:</b> To send live messages directly from the system, configure <b>AFRICASTALKING_API_KEY</b> and <b>AFRICASTALKING_USERNAME</b> in the AI Studio Settings menu.
-                                </p>
-                              )}
+                              <label className="text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono block">Outreach Campaign</label>
+                              <select
+                                value={smsCampaignType}
+                                onChange={(e) => setSmsCampaignType(e.target.value as any)}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs py-1.5 px-2 text-slate-705 font-bold focus:outline-none cursor-pointer"
+                              >
+                                <option value="absenteeism">⚠️ Absenteeism Warning</option>
+                                <option value="praise">🎉 Attendance Praise</option>
+                                <option value="home_visit">🏡 Home Visit Proposal</option>
+                                <option value="medical">🏥 Medical Follow-up</option>
+                                <option value="academic">🏫 Academic Check-in</option>
+                              </select>
                             </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono block">Tone & Disposition</label>
+                              <select
+                                value={smsTone}
+                                onChange={(e) => setSmsTone(e.target.value as any)}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs py-1.5 px-2 text-slate-705 font-bold focus:outline-none cursor-pointer"
+                              >
+                                <option value="polite">🤝 Polite & Direct</option>
+                                <option value="urgent">📢 Urgent & Actionable</option>
+                                <option value="collaborative">❤️ Warm & Collaborative</option>
+                              </select>
+                            </div>
+                          </div>
+
+                          {/* Optional Context */}
+                          <div className="space-y-1">
+                            <label className="text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono block">Additional Caseworker Context (Optional)</label>
+                            <input
+                              type="text"
+                              value={smsExtraContext}
+                              onChange={(e) => setSmsExtraContext(e.target.value)}
+                              placeholder="e.g., mention medical rest, ask about road conditions, include family prayer request..."
+                              className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs focus:outline-none focus:border-indigo-500 placeholder:text-slate-400"
+                            />
+                          </div>
+
+                          {/* Action buttons */}
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={handleGenerateSmsWithGemini}
+                              disabled={isSmsGenerating}
+                              className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-[10.5px] py-2 px-3 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                            >
+                              {isSmsGenerating ? (
+                                <>
+                                  <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                  <span>Optimizing with Gemini...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
+                                  <span>✨ Optimize Message with Gemini AI</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+
+                          {/* Display draft message */}
+                          <div className="space-y-1 pt-1">
+                            <div className="flex items-center justify-between text-[9px] text-slate-400 font-bold uppercase tracking-wider font-mono">
+                              <span>SMS Copy Draft Preview</span>
+                              <span>{smsDraftMessage.length} characters</span>
+                            </div>
+                            <div className="relative">
+                              <textarea
+                                value={smsDraftMessage}
+                                onChange={(e) => setSmsDraftMessage(e.target.value)}
+                                rows={4}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-700 leading-relaxed font-sans placeholder:text-slate-400 focus:outline-none focus:border-slate-350"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Success / Status Info */}
+                          {smsSuccessMsg && (
+                            <div className="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg p-1.5 px-2.5 text-center transition-all animate-fade-in animate-duration-300">
+                              {smsSuccessMsg}
+                            </div>
+                          )}
+
+                          {/* Africa's Talking API Dispatch Status */}
+                          {directSmsResponse && (
+                            <div className={`p-2.5 rounded-xl border text-[10.5px] font-bold transition-all ${
+                              directSmsResponse.success 
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                                : 'bg-rose-50 border-rose-200 text-rose-800'
+                            }`}>
+                              <div className="flex items-start gap-2">
+                                {directSmsResponse.success ? (
+                                  <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                                ) : (
+                                  <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                                )}
+                                <div className="space-y-1">
+                                  <p className="leading-snug">{directSmsResponse.message}</p>
+                                  {directSmsResponse.isSimulated && (
+                                    <p className="text-[9.5px] text-indigo-700 font-normal leading-relaxed">
+                                      💡 <b>Credentials Setup:</b> To send live messages directly from the system, configure <b>AFRICASTALKING_API_KEY</b> and <b>AFRICASTALKING_USERNAME</b> in the AI Studio Settings menu.
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Primary Direct Send Action */}
+                          <button
+                            type="button"
+                            onClick={handleSendDirectSms}
+                            disabled={isSendingDirectSms || !smsDraftMessage.trim()}
+                            className="w-full bg-slate-900 hover:bg-slate-950 text-white font-extrabold text-xs py-2.5 px-4 rounded-xl shadow-2xs hover:shadow-3xs transition-all duration-200 cursor-pointer flex items-center justify-center gap-2 border border-slate-950 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {isSendingDirectSms ? (
+                              <>
+                                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                <span>Broadcasting directly to mobile...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Wifi className="w-4 h-4 text-amber-400 animate-pulse shrink-0" />
+                                <span>⚡ Send Direct via Africa's Talking API Gateway</span>
+                              </>
+                            )}
+                          </button>
+
+                          <div className="grid grid-cols-2 gap-2 pt-0.5 border-t border-slate-100 mt-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(smsDraftMessage);
+                                setSmsCopied(true);
+                                setTimeout(() => setSmsCopied(false), 2000);
+                              }}
+                              className="py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-3xs"
+                            >
+                              {smsCopied ? (
+                                <>
+                                  <Check className="w-4 h-4 text-emerald-500" />
+                                  <span className="text-emerald-600 font-extrabold">Copied!</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3.5 h-3.5 text-slate-400" />
+                                  <span>Copy Message</span>
+                                </>
+                              )}
+                            </button>
+
+                            <a
+                              href={`sms:${inspectedParticipant.contact?.replace(/[^0-9+]/g, '') || ''}?body=${encodeURIComponent(smsDraftMessage)}`}
+                              className="py-2 bg-slate-100 hover:bg-slate-200 text-slate-755 font-bold text-xs rounded-xl text-center cursor-pointer transition-all flex items-center justify-center gap-2 shadow-3xs border border-slate-200/60"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                              <span>Use Native SMS</span>
+                            </a>
                           </div>
                         </div>
                       )}
 
-                      {/* Primary Direct Send Action */}
-                      <button
-                        type="button"
-                        onClick={handleSendDirectSms}
-                        disabled={isSendingDirectSms || !smsDraftMessage.trim()}
-                        className="w-full bg-slate-900 hover:bg-slate-950 text-white font-extrabold text-xs py-2.5 px-4 rounded-xl shadow-2xs hover:shadow-3xs transition-all duration-200 cursor-pointer flex items-center justify-center gap-2 border border-slate-950 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {isSendingDirectSms ? (
-                          <>
-                            <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                            <span>Broadcasting directly to mobile...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Wifi className="w-4 h-4 text-amber-400 animate-pulse shrink-0" />
-                            <span>⚡ Send Direct via Africa's Talking API Gateway</span>
-                          </>
-                        )}
-                      </button>
+                      {/* HISTORY TAB */}
+                      {smsHubActiveTab === 'history' && (() => {
+                        const filteredLogs = allSentSmsLogs.filter(log => {
+                          if (smsHistoryScopeFilter === 'current' && log.participantId !== inspectedParticipant.id) {
+                            return false;
+                          }
 
-                      <div className="grid grid-cols-2 gap-2 pt-0.5 border-t border-slate-100 mt-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            navigator.clipboard.writeText(smsDraftMessage);
-                            setSmsCopied(true);
-                            setTimeout(() => setSmsCopied(false), 2000);
-                          }}
-                          className="py-2 border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold text-xs rounded-xl cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-3xs"
-                        >
-                          {smsCopied ? (
-                            <>
-                              <Check className="w-4 h-4 text-emerald-500" />
-                              <span className="text-emerald-600 font-extrabold">Copied!</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3.5 h-3.5 text-slate-400" />
-                              <span>Copy Message</span>
-                            </>
-                          )}
-                        </button>
+                          if (smsHistoryCampaignFilter !== 'all') {
+                            const normalizedCampaign = log.campaignType.toLowerCase();
+                            const normalizedFilter = smsHistoryCampaignFilter.toLowerCase();
+                            if (!normalizedCampaign.includes(normalizedFilter)) {
+                              return false;
+                            }
+                          }
 
-                        <a
-                          href={`sms:${inspectedParticipant.contact?.replace(/[^0-9+]/g, '') || ''}?body=${encodeURIComponent(smsDraftMessage)}`}
-                          className="py-2 bg-slate-100 hover:bg-slate-200 text-slate-705 font-bold text-xs rounded-xl text-center cursor-pointer transition-all flex items-center justify-center gap-2 shadow-3xs border border-slate-200/60"
-                        >
-                          <MessageSquare className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                          <span>Use Native SMS</span>
-                        </a>
-                      </div>
+                          if (smsHistorySearchQuery.trim() !== '') {
+                            const q = smsHistorySearchQuery.toLowerCase();
+                            const matchesName = log.participantName.toLowerCase().includes(q);
+                            const matchesContact = log.participantContact.toLowerCase().includes(q);
+                            const matchesContent = log.messageContent.toLowerCase().includes(q);
+                            if (!matchesName && !matchesContact && !matchesContent) {
+                              return false;
+                            }
+                          }
+
+                          return true;
+                        });
+
+                        return (
+                          <div className="space-y-3 animate-fade-in text-left">
+                            {/* Search and Filters panel */}
+                            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+                              <div className="flex flex-col sm:flex-row gap-2">
+                                {/* Search bar */}
+                                <div className="relative flex-1">
+                                  <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                                  <input
+                                    type="text"
+                                    placeholder="Search name, phone, message content..."
+                                    value={smsHistorySearchQuery}
+                                    onChange={(e) => setSmsHistorySearchQuery(e.target.value)}
+                                    className="w-full bg-white border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                  />
+                                </div>
+
+                                {/* Campaign Filter */}
+                                <select
+                                  value={smsHistoryCampaignFilter}
+                                  onChange={(e) => setSmsHistoryCampaignFilter(e.target.value)}
+                                  className="bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
+                                >
+                                  <option value="all">All Campaigns</option>
+                                  <option value="absenteeism">⚠️ Absenteeism</option>
+                                  <option value="praise">🎉 Praise</option>
+                                  <option value="home_visit">🏡 Home Visit</option>
+                                  <option value="medical">🏥 Medical</option>
+                                  <option value="academic">🏫 Academic</option>
+                                </select>
+
+                                {/* Scope Filter */}
+                                <select
+                                  value={smsHistoryScopeFilter}
+                                  onChange={(e) => setSmsHistoryScopeFilter(e.target.value as any)}
+                                  className="bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-slate-700 focus:outline-none cursor-pointer"
+                                >
+                                  <option value="all">All Participants</option>
+                                  <option value="current">Only {inspectedParticipant.name}</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            {/* History logs list */}
+                            <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
+                              {filteredLogs.length > 0 ? (
+                                filteredLogs.map((log, idx) => (
+                                  <div key={`${log.id}-${idx}`} className="p-3.5 bg-slate-50/50 border border-slate-200 rounded-xl space-y-2 hover:border-slate-300 hover:bg-slate-50 transition-all">
+                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px]">
+                                      <div className="flex flex-wrap items-center gap-1.5">
+                                        <span className="font-extrabold text-slate-805">{log.participantName}</span>
+                                        <span className="text-slate-450 font-mono text-[9.5px]">({log.participantContact})</span>
+                                        <span className="text-[9.5px] bg-slate-200 text-slate-700 rounded px-1.5 py-0.2 capitalize font-bold">
+                                          {log.campaignType}
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                                        <span>{log.timestamp}</span>
+                                      </div>
+                                    </div>
+
+                                    <div className="bg-white border border-slate-150 rounded-lg p-2.5 text-xs text-slate-650 leading-relaxed italic">
+                                      "{log.messageContent}"
+                                    </div>
+
+                                    <div className="flex items-center justify-between text-[10px] pt-0.5">
+                                      <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded px-1.5 py-0.5 font-bold font-mono">
+                                        <CheckCircle className="w-3 h-3 text-emerald-500" />
+                                        <span>Delivered</span>
+                                      </span>
+                                      <span className="text-slate-400 font-mono text-[9px]">Carrier Gateway: Africa's Talking</span>
+                                    </div>
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="text-center py-10 bg-slate-50/50 border border-dashed border-slate-200 rounded-xl">
+                                  <History className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                                  <p className="text-slate-500 text-xs font-bold">No dispatched SMS matched search.</p>
+                                  <p className="text-slate-400 text-[10px] mt-0.5">Dispatched Africa's Talking messages will show up here.</p>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
@@ -16287,8 +18171,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
                                   <option value="">-- Choose Name Field --</option>
-                                  {googleFormQuestions.map((q) => (
-                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  {googleFormQuestions.map((q, idx) => (
+                                    <option key={`q-name-${q.questionId}-${idx}`} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
                               </div>
@@ -16302,8 +18186,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
                                   <option value="">-- Skip / Choose Question --</option>
-                                  {googleFormQuestions.map((q) => (
-                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  {googleFormQuestions.map((q, idx) => (
+                                    <option key={`q-contact-${q.questionId}-${idx}`} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
                               </div>
@@ -16317,8 +18201,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
                                   <option value="">-- Skip / Default assignment --</option>
-                                  {googleFormQuestions.map((q) => (
-                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  {googleFormQuestions.map((q, idx) => (
+                                    <option key={`q-cohort-${q.questionId}-${idx}`} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
                               </div>
@@ -16332,8 +18216,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
                                   <option value="">-- Skip / Choose Question --</option>
-                                  {googleFormQuestions.map((q) => (
-                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  {googleFormQuestions.map((q, idx) => (
+                                    <option key={`q-idno-${q.questionId}-${idx}`} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
                               </div>
@@ -16347,8 +18231,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
                                   <option value="">-- Skip / Choose Question --</option>
-                                  {googleFormQuestions.map((q) => (
-                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  {googleFormQuestions.map((q, idx) => (
+                                    <option key={`q-schooling-${q.questionId}-${idx}`} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
                               </div>
@@ -16362,8 +18246,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
                                   <option value="">-- Skip / Choose Question --</option>
-                                  {googleFormQuestions.map((q) => (
-                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  {googleFormQuestions.map((q, idx) => (
+                                    <option key={`q-class-${q.questionId}-${idx}`} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
                               </div>
@@ -16377,8 +18261,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
                                   <option value="">-- Skip / Choose Question --</option>
-                                  {googleFormQuestions.map((q) => (
-                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  {googleFormQuestions.map((q, idx) => (
+                                    <option key={`q-village-${q.questionId}-${idx}`} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
                               </div>
@@ -16392,8 +18276,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
                                   <option value="">-- Skip / Choose Question --</option>
-                                  {googleFormQuestions.map((q) => (
-                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  {googleFormQuestions.map((q, idx) => (
+                                    <option key={`q-caregiver-${q.questionId}-${idx}`} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
                               </div>
@@ -16407,8 +18291,8 @@ UG 1083 Child Development Office All Rights Reserved.`;
                                   className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-[11px] font-medium text-slate-700 cursor-pointer focus:bg-white"
                                 >
                                   <option value="">-- Skip / Choose Question --</option>
-                                  {googleFormQuestions.map((q) => (
-                                    <option key={q.questionId} value={q.questionId}>{q.title}</option>
+                                  {googleFormQuestions.map((q, idx) => (
+                                    <option key={`q-notes-${q.questionId}-${idx}`} value={q.questionId}>{q.title}</option>
                                   ))}
                                 </select>
                               </div>

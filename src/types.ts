@@ -143,3 +143,51 @@ export interface Budget {
   signedOffMonth?: string;
 }
 
+export interface PettyCashRequest {
+  id: string;
+  amount: number;
+  purpose: string;
+  dates: string; // e.g. YYYY-MM-DD or range
+  submittedBy: 'CDO HEALTH' | 'CDO SDR' | 'CDO HBP' | string;
+  submittedAt: string;
+  status: 'Draft' | 'Pending' | 'Approved' | 'Returned for Correction' | 'Rejected';
+  correctionNotes?: string;
+  aiEnhancedExplanation?: string;
+  isAiEnhanced?: boolean;
+}
+
+export interface PerformanceTargetItem {
+  id: string;
+  kra: string;
+  plannedActivities: string;
+  measureOfSuccess: string;
+  targetDate: string;
+  selfAssessment?: string; // "1-Poor" to "5-Excellent" rating or text
+  supervisorAssessment?: string;
+}
+
+export interface StaffPerformanceCycle {
+  id: string;
+  isActive?: boolean;
+  staffName: string;
+  staffRole: 'CDO HEALTH' | 'CDO SDR' | 'CDO HBP' | string;
+  fiscalYear: string;
+  status: 'Draft' | 'Submitted' | 'Approved' | 'Returned for Correction';
+  submittedAt: string;
+  correctionNotes?: string;
+  targets: PerformanceTargetItem[];
+  approvals: {
+    staffSignedName?: string;
+    staffSignedDate?: string;
+    supervisorSignedName?: string;
+    supervisorSignedDate?: string;
+    reviewerSignedName?: string;
+    reviewerSignedDate?: string;
+    overallSelfComment?: string;
+    overallSupervisorComment?: string;
+    reviewerComment?: string;
+  };
+}
+
+
+

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, CheckSquare, AlignLeft, Calendar as CalendarIcon, Users, RefreshCw, CheckCircle, AlertCircle, Download } from 'lucide-react';
+import { X, CheckSquare, AlignLeft, Calendar as CalendarIcon, Users, RefreshCw, CheckCircle, AlertCircle, Download, Sparkles } from 'lucide-react';
 import { Session, Participant, AttendanceRecord } from '../types';
 import { generateDailyTurnoutPDF } from '../utils/dailyTurnoutPdf';
 
@@ -44,14 +44,91 @@ export const SessionInspectorModal: React.FC<SessionInspectorModalProps> = ({
   const [checklist, setChecklist] = useState<Record<string, boolean>>({});
   const [notes, setNotes] = useState('');
 
+  // AI report states
+  const [topic, setTopic] = useState('');
+  const [highlights, setHighlights] = useState('');
+  const [challenges, setChallenges] = useState('');
+  const [studentUpdates, setStudentUpdates] = useState('');
+  const [showAiHelper, setShowAiHelper] = useState(false);
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const [generatedReport, setGeneratedReport] = useState<string | null>(null);
+  const [generationError, setGenerationError] = useState<string | null>(null);
+
   useEffect(() => {
     if (session) {
       setChecklist(session.checklist || {});
       setNotes(session.notes || '');
+      // Clear or reset AI fields for the new session
+      setTopic('');
+      setHighlights('');
+      setChallenges('');
+      setStudentUpdates('');
+      setGeneratedReport(null);
+      setGenerationError(null);
     }
   }, [session]);
 
   if (!isOpen || !session) return null;
+
+  const handleGenerateAiReport = async () => {
+    setIsGeneratingReport(true);
+    setGenerationError(null);
+    setGeneratedReport(null);
+    try {
+      // Find each participant's status for the current session date
+      const participantsWithStatus = activeParticipants.map(p => {
+        const status = attendance[p.id]?.[session.date] || 'unmarked';
+        return {
+          id: p.id,
+          name: p.name,
+          cohort: p.cohort,
+          status
+        };
+      });
+
+      const res = await fetch("/api/gemini/analyze-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          session,
+          attendanceStats,
+          templateData: {
+            topic,
+            highlights,
+            challenges,
+            studentUpdates
+          },
+          participants: participantsWithStatus
+        })
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || "Failed to generate report.");
+      }
+
+      const data = await res.json();
+      if (data.report) {
+        setGeneratedReport(data.report);
+      } else {
+        throw new Error("Report not returned in server response.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setGenerationError(err.message || "An unexpected error occurred during report drafting.");
+    } finally {
+      setIsGeneratingReport(false);
+    }
+  };
+
+  const handleApplyReport = () => {
+    if (generatedReport) {
+      setNotes(generatedReport);
+      setShowAiHelper(false);
+    }
+  };
 
   const handleToggleCheck = (item: string) => {
     setChecklist(prev => ({ ...prev, [item]: !prev[item] }));
@@ -179,10 +256,137 @@ export const SessionInspectorModal: React.FC<SessionInspectorModalProps> = ({
 
           {/* Notes */}
           <div className="space-y-3">
-            <div className="flex items-center gap-2 text-slate-700 font-bold text-xs uppercase tracking-wider">
-              <AlignLeft className="w-4 h-4" />
-              Session Report Notes
+            <div className="flex items-center justify-between text-slate-700 font-bold text-xs uppercase tracking-wider">
+              <div className="flex items-center gap-2">
+                <AlignLeft className="w-4 h-4" />
+                Session Report Notes
+              </div>
             </div>
+
+            {/* AI Assistant Banner */}
+            <button
+              type="button"
+              onClick={() => setShowAiHelper(!showAiHelper)}
+              className="w-full flex items-center justify-between p-3.5 bg-gradient-to-r from-indigo-50 to-purple-50 hover:from-indigo-100 hover:to-purple-100 border border-indigo-100 rounded-xl text-left transition-all cursor-pointer"
+            >
+              <div className="flex items-center gap-2.5">
+                <Sparkles className="w-4 h-4 text-indigo-600 animate-pulse shrink-0" />
+                <div>
+                  <div className="text-xs font-bold text-indigo-900 uppercase tracking-wide">✨ AI Report Writer</div>
+                  <div className="text-[10.5px] text-indigo-700 font-medium">Draft a structured professional report with Gemini AI</div>
+                </div>
+              </div>
+              <span className="text-[10px] font-bold text-indigo-600 bg-white px-2 py-0.5 rounded-md border border-indigo-100 shrink-0">
+                {showAiHelper ? 'Hide' : 'Open Assistant'}
+              </span>
+            </button>
+
+            {showAiHelper && (
+              <div className="border border-indigo-100 bg-slate-50/50 rounded-xl p-4 space-y-3.5 shadow-2xs animate-fade-in text-xs">
+                <div className="text-[11px] text-slate-600 leading-relaxed">
+                  Provide brief points below. Gemini will weave them together with turnout statistics and individual attendance flags for this session.
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">1. Main Topic or Activity Taught <span className="text-rose-500">*</span></label>
+                    <input
+                      type="text"
+                      value={topic}
+                      onChange={(e) => setTopic(e.target.value)}
+                      placeholder="e.g., Sponsor letters writing, health workshop, math division"
+                      className="w-full bg-white border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">2. Key Highlights / Milestones</label>
+                    <textarea
+                      value={highlights}
+                      onChange={(e) => setHighlights(e.target.value)}
+                      placeholder="e.g., Victors class completed letters, John helped latecomers"
+                      className="w-full bg-white border border-slate-200 rounded-lg p-2.5 h-14 resize-none focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">3. Challenges / Materials Needed</label>
+                    <textarea
+                      value={challenges}
+                      onChange={(e) => setChallenges(e.target.value)}
+                      placeholder="e.g., Ran out of notebooks. Delay due to heavy rain"
+                      className="w-full bg-white border border-slate-200 rounded-lg p-2.5 h-14 resize-none focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">4. Individual Child Updates (Optional)</label>
+                    <input
+                      type="text"
+                      value={studentUpdates}
+                      onChange={(e) => setStudentUpdates(e.target.value)}
+                      placeholder="e.g., Sarah was extremely active; Silas needs spelling help"
+                      className="w-full bg-white border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-2 justify-end pt-1">
+                  <button
+                    type="button"
+                    onClick={handleGenerateAiReport}
+                    disabled={isGeneratingReport || !topic.trim()}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all shadow-3xs cursor-pointer ${
+                      isGeneratingReport
+                        ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                        : !topic.trim()
+                        ? 'bg-indigo-50 text-indigo-400 border border-indigo-100 cursor-not-allowed'
+                        : 'bg-indigo-600 hover:bg-indigo-700 text-white hover:scale-[1.01]'
+                    }`}
+                  >
+                    {isGeneratingReport ? (
+                      <>
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        Generating report...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="h-3 w-3 text-indigo-200" />
+                        Draft Report with AI
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {generationError && (
+                  <div className="text-[11px] text-rose-600 font-semibold bg-rose-50 border border-rose-100 rounded-lg p-2.5 flex items-start gap-1.5 animate-fade-in">
+                    <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                    <span>{generationError}</span>
+                  </div>
+                )}
+
+                {generatedReport && (
+                  <div className="bg-indigo-50/40 border border-indigo-100 rounded-xl p-3.5 space-y-2.5 shadow-3xs animate-fade-in">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-indigo-900 uppercase font-mono">Drafted Report Preview</span>
+                      <button
+                        type="button"
+                        onClick={handleApplyReport}
+                        className="flex items-center gap-1 text-[10px] font-bold text-indigo-700 hover:text-white bg-indigo-50 hover:bg-indigo-600 border border-indigo-200 px-2 py-0.5 rounded-md transition-colors cursor-pointer"
+                      >
+                        <CheckCircle className="w-3 h-3" />
+                        Apply to Notes
+                      </button>
+                    </div>
+                    <div className="bg-white border border-slate-200 rounded-lg p-3 max-h-48 overflow-y-auto text-xs text-slate-700 leading-relaxed font-sans prose prose-sm whitespace-pre-wrap">
+                      {generatedReport}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}

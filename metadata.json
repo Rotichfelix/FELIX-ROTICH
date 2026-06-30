@@ -1,6 +1,6 @@
 {
   "name": "Lomuriangole CYDC Tracker",
-  "description": "An interactive attendance tracker for Lomuriangole Child and Youth Development Center. Automatically flags participants with yellow or red alert status based on consecutive absences or high absenteeism patterns.",
+  "description": "An interactive attendance tracker for Lomuriangole Child and Youth Development Center with offline-first service worker caching and seamless data synchronization. Automatically flags participants with yellow or red alert status based on consecutive absences or high absenteeism patterns.",
   "requestFramePermissions": ["camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

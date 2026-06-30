@@ -8,13 +8,32 @@ import { users, participants, sessions, attendance } from "./src/db/schema.ts";
 import { eq, and } from "drizzle-orm";
 import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
 import { getOrCreateUser } from "./src/db/users.ts";
+import { adminAuth } from "./src/lib/firebase-admin.ts";
 
-// Helper function to call Gemini with exponential backoff retry mechanism for resilient generations
-async function callGeminiWithRetry<T>(apiCall: () => Promise<T>, maxRetries = 3, initialDelay = 1500): Promise<T> {
+// Helper function to call Gemini with exponential backoff and automatic model fallback for maximum resilience
+async function callGeminiWithRetry(
+  ai: GoogleGenAI,
+  params: {
+    model?: string;
+    contents: any;
+    config?: any;
+  },
+  maxRetries = 4,
+  initialDelay = 1500
+): Promise<any> {
+  const baseModel = params.model || "gemini-3.5-flash";
+  const fallbackModels = [baseModel, "gemini-flash-latest", "gemini-3.1-flash-lite"];
+  
   let attempt = 0;
+  let modelIndex = 0;
+  
   while (true) {
+    const activeModel = fallbackModels[modelIndex];
     try {
-      return await apiCall();
+      return await ai.models.generateContent({
+        ...params,
+        model: activeModel,
+      });
     } catch (error: any) {
       attempt++;
       const errMsg = error?.message || '';
@@ -27,8 +46,16 @@ async function callGeminiWithRetry<T>(apiCall: () => Promise<T>, maxRetries = 3,
                           errMsg.includes("overloaded");
                           
       if (isTransient && attempt < maxRetries) {
+        // Switch to next fallback model on retry
+        if (modelIndex < fallbackModels.length - 1) {
+          modelIndex++;
+          console.warn(`[WARNING] Gemini model ${fallbackModels[modelIndex-1]} failed with transient error (status: ${status || 'unknown'}, msg: "${errMsg}"). Falling back to ${fallbackModels[modelIndex]}...`);
+        } else {
+          // Wrap around or keep trying the last one
+          modelIndex = 0;
+        }
         const delay = initialDelay * Math.pow(2, attempt) + Math.random() * 800;
-        console.warn(`[WARNING] Gemini API call failed with transient error (status: ${status || 'unknown'}, msg: "${errMsg}"). Retrying attempt ${attempt}/${maxRetries} in ${Math.round(delay)}ms...`);
+        console.warn(`[WARNING] Gemini API call failed with transient error. Retrying attempt ${attempt}/${maxRetries} in ${Math.round(delay)}ms...`);
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
@@ -96,7 +123,15 @@ async function startServer() {
         staffEmailRecipient: metadata.staffEmailRecipient || "",
         isAutomaticEmailEnabled: metadata.isAutomaticEmailEnabled || false,
         staffTasks: metadata.staffTasks || [],
-        complianceStatus: metadata.complianceStatus || null
+        complianceStatus: metadata.complianceStatus || null,
+        userRole: metadata.userRole || "ADMINISTRATOR",
+        budgets: metadata.budgets || [],
+        pettyCashRequests: metadata.pettyCashRequests || [],
+        performanceCycles: metadata.performanceCycles || [],
+        monthlyJournals: metadata.monthlyJournals || [],
+        annualTargetsJournals: metadata.annualTargetsJournals || [],
+        monthlyPerformanceTargets: metadata.monthlyPerformanceTargets || [],
+        closedMonthlyPerformanceJournals: metadata.closedMonthlyPerformanceJournals || []
       });
     } catch (error: any) {
       console.error("Failed to read database records from Cloud SQL:", error);
@@ -121,7 +156,15 @@ async function startServer() {
         staffEmailRecipient,
         isAutomaticEmailEnabled,
         staffTasks,
-        complianceStatus
+        complianceStatus,
+        userRole,
+        budgets,
+        pettyCashRequests,
+        performanceCycles,
+        monthlyJournals,
+        annualTargetsJournals,
+        monthlyPerformanceTargets,
+        closedMonthlyPerformanceJournals
       } = req.body;
 
       // 1. Get or create user in DB
@@ -137,7 +180,15 @@ async function startServer() {
             staffEmailRecipient: staffEmailRecipient || "",
             isAutomaticEmailEnabled: !!isAutomaticEmailEnabled,
             staffTasks: staffTasks || [],
-            complianceStatus: complianceStatus || null
+            complianceStatus: complianceStatus || null,
+            userRole: userRole || (dbUser.metadata as any)?.userRole || "ADMINISTRATOR",
+            budgets: budgets || [],
+            pettyCashRequests: pettyCashRequests || [],
+            performanceCycles: performanceCycles || [],
+            monthlyJournals: monthlyJournals || [],
+            annualTargetsJournals: annualTargetsJournals || [],
+            monthlyPerformanceTargets: monthlyPerformanceTargets || [],
+            closedMonthlyPerformanceJournals: closedMonthlyPerformanceJournals || []
           }
         })
         .where(eq(users.id, dbUser.id));
@@ -262,6 +313,226 @@ async function startServer() {
     }
   });
 
+  // OTP Store map
+  const otpStore = new Map<string, { code: string; expiresAt: number }>();
+
+  // API Route - Get all user accounts (Admin only)
+  app.get("/api/admin/users", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.user || !req.user.uid) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const adminUser = await getOrCreateUser(req.user.uid, req.user.email || "");
+      const adminRole = (adminUser.metadata as any)?.userRole || "ADMINISTRATOR";
+      if (adminRole !== "ADMINISTRATOR") {
+        return res.status(403).json({ error: "Forbidden: Administrator access required" });
+      }
+
+      const allUsers = await db.select().from(users);
+      return res.json(allUsers.map(u => ({
+        id: u.id,
+        uid: u.uid,
+        email: u.email,
+        role: (u.metadata as any)?.userRole || "STAFF",
+        createdAt: u.createdAt,
+      })));
+    } catch (error: any) {
+      console.error("Failed to fetch user accounts:", error);
+      return res.status(500).json({ error: "Failed to fetch user accounts", details: error.message });
+    }
+  });
+
+  // API Route - Create/Configure a user account (Admin only)
+  app.post("/api/admin/users", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.user || !req.user.uid) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const adminUser = await getOrCreateUser(req.user.uid, req.user.email || "");
+      const adminRole = (adminUser.metadata as any)?.userRole || "ADMINISTRATOR";
+      if (adminRole !== "ADMINISTRATOR") {
+        return res.status(403).json({ error: "Forbidden: Administrator access required" });
+      }
+
+      const { email, role } = req.body;
+      if (!email || !role) {
+        return res.status(400).json({ error: "Email and role are required" });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+
+      // 1. Create or get Firebase User
+      let firebaseUser;
+      try {
+        firebaseUser = await adminAuth.getUserByEmail(normalizedEmail);
+      } catch (err: any) {
+        if (err.code === "auth/user-not-found") {
+          firebaseUser = await adminAuth.createUser({
+            email: normalizedEmail,
+            emailVerified: true,
+          });
+        } else {
+          throw err;
+        }
+      }
+
+      // 2. Insert or update in Cloud SQL Postgres
+      const existingUsers = await db.select().from(users).where(eq(users.uid, firebaseUser.uid));
+      
+      if (existingUsers.length > 0) {
+        const currentUserRecord = existingUsers[0];
+        const existingMetadata = (currentUserRecord.metadata as any) || {};
+        const updatedMetadata = {
+          ...existingMetadata,
+          userRole: role,
+        };
+        
+        await db.update(users)
+          .set({
+            email: normalizedEmail,
+            metadata: updatedMetadata,
+          })
+          .where(eq(users.id, currentUserRecord.id));
+      } else {
+        await db.insert(users)
+          .values({
+            uid: firebaseUser.uid,
+            email: normalizedEmail,
+            metadata: {
+              userRole: role,
+              participants: [],
+              sessions: [],
+              attendance: {},
+            },
+          });
+      }
+
+      return res.json({ success: true, message: `Account created/configured for ${normalizedEmail} as ${role}.` });
+    } catch (error: any) {
+      console.error("Failed to create user account:", error);
+      return res.status(500).json({ error: "Failed to create user account", details: error.message });
+    }
+  });
+
+  // API Route - Delete a user account (Admin only)
+  app.delete("/api/admin/users/:id", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.user || !req.user.uid) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const adminUser = await getOrCreateUser(req.user.uid, req.user.email || "");
+      const adminRole = (adminUser.metadata as any)?.userRole || "ADMINISTRATOR";
+      if (adminRole !== "ADMINISTRATOR") {
+        return res.status(403).json({ error: "Forbidden: Administrator access required" });
+      }
+
+      const targetId = parseInt(req.params.id);
+      if (isNaN(targetId)) {
+        return res.status(400).json({ error: "Invalid user ID" });
+      }
+
+      if (targetId === adminUser.id) {
+        return res.status(400).json({ error: "You cannot delete your own admin account!" });
+      }
+
+      const targetUser = await db.select().from(users).where(eq(users.id, targetId));
+      if (targetUser.length === 0) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      await db.delete(users).where(eq(users.id, targetId));
+
+      try {
+        await adminAuth.deleteUser(targetUser[0].uid);
+      } catch (fbErr) {
+        console.warn(`Could not delete user ${targetUser[0].uid} from Firebase Auth:`, fbErr);
+      }
+
+      return res.json({ success: true, message: "User account successfully deleted" });
+    } catch (error: any) {
+      console.error("Failed to delete user account:", error);
+      return res.status(500).json({ error: "Failed to delete user account", details: error.message });
+    }
+  });
+
+  // API Route - Send OTP Code
+  app.post("/api/auth/otp/send", async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email) {
+        return res.status(400).json({ error: "Email is required" });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+
+      const dbUsers = await db.select().from(users).where(eq(users.email, normalizedEmail));
+      if (dbUsers.length === 0) {
+        return res.status(404).json({ error: "Access Denied: This email has not been registered by the system administrator." });
+      }
+
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+      otpStore.set(normalizedEmail, { code, expiresAt });
+
+      console.log(`\n========================================\n[OTP LOGIN] Verification Code for ${normalizedEmail}: ${code}\n========================================\n`);
+
+      return res.json({
+        success: true,
+        message: "Verification code generated.",
+        devPreviewCode: code
+      });
+    } catch (error: any) {
+      console.error("Failed to send verification code:", error);
+      return res.status(500).json({ error: "Failed to process login request", details: error.message });
+    }
+  });
+
+  // API Route - Verify OTP Code and login
+  app.post("/api/auth/otp/verify", async (req, res) => {
+    try {
+      const { email, code } = req.body;
+      if (!email || !code) {
+        return res.status(400).json({ error: "Email and code are required" });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      const otpData = otpStore.get(normalizedEmail);
+
+      if (!otpData) {
+        return res.status(400).json({ error: "No active verification request found for this email." });
+      }
+
+      if (Date.now() > otpData.expiresAt) {
+        otpStore.delete(normalizedEmail);
+        return res.status(400).json({ error: "The verification code has expired. Please request a new one." });
+      }
+
+      if (otpData.code !== code.trim()) {
+        return res.status(400).json({ error: "Invalid verification code. Please double-check and try again." });
+      }
+
+      otpStore.delete(normalizedEmail);
+
+      const dbUsers = await db.select().from(users).where(eq(users.email, normalizedEmail));
+      if (dbUsers.length === 0) {
+        return res.status(404).json({ error: "User record not found in system." });
+      }
+
+      const userRecord = dbUsers[0];
+      const customToken = await adminAuth.createCustomToken(userRecord.uid);
+
+      return res.json({
+        success: true,
+        customToken,
+        message: "Code verified successfully."
+      });
+    } catch (error: any) {
+      console.error("Failed to verify code:", error);
+      return res.status(500).json({ error: "Failed to complete verification", details: error.message });
+    }
+  });
+
 
   // API Route - Analyze student performance
   app.post("/api/gemini/analyze-student", async (req, res) => {
@@ -354,7 +625,7 @@ Please return a JSON-structured performance report. Provide deep, qualitative in
 ${dateRange?.start || dateRange?.end ? `PLEASE NOTE: This report is focused on the date range from ${dateRange.start || 'Beginning'} to ${dateRange.end || 'Now'}.` : ''}
 `;
 
-      const response = await callGeminiWithRetry(() => ai.models.generateContent({
+      const response = await callGeminiWithRetry(ai, {
         model: "gemini-3.5-flash",
         contents: prompt,
         config: {
@@ -374,7 +645,7 @@ ${dateRange?.start || dateRange?.end ? `PLEASE NOTE: This report is focused on t
             required: ["summary", "attendanceScoreAnalysis", "insights", "recommendation"]
           }
         }
-      }));
+      });
 
       const responseText = response.text || "{}";
       const parsed = JSON.parse(responseText.trim());
@@ -510,7 +781,7 @@ Each entry in "studentReports" must exactly have:
 - "recommendedAction": a specific, direct next step for the field counselor or staff to take (such as caregiver consultation, home visitation, or local transport assistance).
 `;
 
-      const response = await callGeminiWithRetry(() => ai.models.generateContent({
+      const response = await callGeminiWithRetry(ai, {
         model: "gemini-3.5-flash",
         contents: prompt,
         config: {
@@ -562,7 +833,7 @@ Each entry in "studentReports" must exactly have:
             required: ["cohortSummary", "overallRiskDistribution", "comparativeAnalysis", "systemStats", "strategicRecommendations", "studentReports"]
           }
         }
-      }));
+      });
 
       const responseText = response.text || "{}";
       const parsed = JSON.parse(responseText.trim());
@@ -571,6 +842,104 @@ Each entry in "studentReports" must exactly have:
     } catch (error: any) {
       console.error("Gemini cohort analysis failed:", error);
       return res.status(500).json({ error: error.message || "Failed to generate cohort analysis." });
+    }
+  });
+
+  // API Route - Generate structured session report from a template and attendance stats
+  app.post("/api/gemini/analyze-session", async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(400).json({ error: "GEMINI_API_KEY environment variable is not configured. Please add your Gemini API Key in Settings > Secrets." });
+      }
+
+      const { session, attendanceStats, templateData, participants } = req.body;
+      if (!session || !attendanceStats || !templateData) {
+        return res.status(400).json({ error: "Missing required session, attendanceStats or templateData." });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey: apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
+      // Construct student-by-student attendance list string
+      let participantsListStr = "No participant list provided.";
+      if (Array.isArray(participants) && participants.length > 0) {
+        participantsListStr = participants.map((p: any) => {
+          const status = p.status || 'unmarked';
+          return `- Student: ${p.name} | Cohort: ${p.cohort} | Status: ${status.toUpperCase()}`;
+        }).join('\n');
+      }
+
+      const prompt = `
+You are an expert Educational Cohort Success & Welfare Analyst at Lomuriangole Child and Youth Development Center.
+Your task is to draft a professional, detailed, and highly constructive Session Report based on:
+1. General Session Details
+2. Attendance Stats for this session
+3. The specific student-by-student attendance list (focusing on present/absent/excused statuses)
+4. A staff-provided template of notes/highlights/challenges
+
+---
+SESSION DETAILS:
+- Date: ${session.date}
+- Session Label: ${session.label || 'Regular Session'}
+- Activities Checklist completed: ${Object.entries(session.checklist || {}).filter(([_, val]) => val).map(([key]) => key).join(', ') || 'None'}
+
+ATTENDANCE STATS:
+- Attendance Rate: ${attendanceStats.rate}%
+- Present: ${attendanceStats.present}
+- Absent: ${attendanceStats.absent}
+- Excused: ${attendanceStats.excused}
+
+STAFF-PROVIDED KEY POINTS (TEMPLATE):
+- Topic/Lessons: ${templateData.topic || 'N/A'}
+- Highlights/Milestones: ${templateData.highlights || 'N/A'}
+- Challenges/Materials Needed: ${templateData.challenges || 'N/A'}
+- Individual Student Updates: ${templateData.studentUpdates || 'N/A'}
+
+STUDENT ATTENDANCE REGISTRY (FOR THIS SESSION):
+${participantsListStr}
+
+---
+REQUIREMENTS FOR THE REPORT:
+Please compose a beautifully written, formal and encouraging session report in Markdown format.
+The report MUST contain the following sections:
+1. **Executive Summary**: A concise paragraph summarizing the session's overall turnout and success. Speak warmly of the child support initiative at Lomuriangole.
+2. **Key Learning Points & Activities**: Discuss the lessons or workshops delivered, expanding on the topic provided.
+3. **Notable Highlights & Individual Milestones**: Detail any success stories, milestones, or specific updates about children mentioned in the template or who had exceptional attendance behavior.
+4. **Challenges & Resource Constraints**: Identify any roadblocks (e.g., shortages of materials, late arrivals) and list actionable resources or support required.
+5. **Absentee Follow-Up Plan**: Specifically list the names of the students who were ABSENT or EXCUSED during this session. Outline a brief, caring outreach strategy for each or for the group to ensure they are visited by caseworkers or supported.
+
+Write in a highly professional, compassionate, and structured tone. Use elegant clear spacing and beautiful markdown bullet points. Return a JSON object with a single "report" key containing the Markdown string.
+`;
+
+      const response = await callGeminiWithRetry(ai, {
+        model: "gemini-3.5-flash",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              report: { type: "STRING", description: "The drafted markdown report content" }
+            },
+            required: ["report"]
+          }
+        }
+      });
+
+      const responseText = response.text || "{}";
+      const parsed = JSON.parse(responseText.trim());
+      return res.json(parsed);
+
+    } catch (error: any) {
+      console.error("Gemini session report generation failed:", error);
+      return res.status(500).json({ error: error.message || "Failed to generate session report." });
     }
   });
 
@@ -671,7 +1040,7 @@ Extract a general title, summary and key takeaways.`;
         };
       }
 
-      const response = await callGeminiWithRetry(() => ai.models.generateContent({
+      const response = await callGeminiWithRetry(ai, {
         model: "gemini-3.5-flash",
         contents: {
           parts: [
@@ -693,7 +1062,7 @@ Extract a general title, summary and key takeaways.`;
             properties: schemaProperties
           }
         }
-      }));
+      });
 
       const textResult = response.text || "{}";
       const parsedData = JSON.parse(textResult.trim());
@@ -766,10 +1135,10 @@ CONSTRAINTS:
 5. Do NOT output markdown, quotes, formatting prefixes, or anything else. Just output the raw message text ready to copy or send immediately.
 `;
 
-      const response = await callGeminiWithRetry(() => ai.models.generateContent({
+      const response = await callGeminiWithRetry(ai, {
         model: "gemini-3.5-flash",
         contents: prompt,
-      }));
+      });
 
       const responseText = (response.text || "").trim();
       return res.json({ success: true, sms: responseText });
@@ -777,6 +1146,51 @@ CONSTRAINTS:
     } catch (error: any) {
       console.error("Gemini SMS outreach composer failed:", error);
       return res.status(500).json({ error: error.message || "Failed to compose SMS message." });
+    }
+  });
+
+  // API Route - Enhance Petty Cash Request description using AI
+  app.post("/api/gemini/enhance-petty-cash", async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(400).json({ error: "GEMINI_API_KEY environment variable is not configured. Please add your Gemini API Key in Settings > Secrets." });
+      }
+
+      const { amount, purpose, dates, submittedBy } = req.body;
+      if (!amount || !purpose || !dates || !submittedBy) {
+        return res.status(400).json({ error: "Missing required parameters (amount, purpose, dates, or submittedBy)." });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey: apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
+      const prompt = `You are a professional administrative assistant for the Lomuriangole Child and Youth Development Center.
+A petty cash request is being submitted by the department: "${submittedBy}".
+Request Details:
+- Amount requested: UGX ${amount}
+- Purpose: "${purpose}"
+- Intended dates: "${dates}"
+
+Write a highly professional, well-reasoned, and polite justification statement for this petty cash request. The statement should expand on the purpose, explaining why it is critical for the center's activities during the requested dates, ensuring proper care for our children/participants, and showing accountability. Keep the response to 1-2 concise and professional paragraphs. Avoid placeholders; generate concrete, realistic reasoning appropriate for the Lomuriangole child care center context. Do not include subject lines or greetings, just the body paragraphs of the justification.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: prompt,
+      });
+
+      const explanation = (response.text || "").trim();
+      return res.json({ success: true, explanation });
+
+    } catch (error: any) {
+      console.error("Gemini Petty Cash Enhancer failed:", error);
+      return res.status(500).json({ error: error.message || "Failed to enhance petty cash request." });
     }
   });
 

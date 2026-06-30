@@ -1,7 +1,8 @@
 // Lomuriangole CYDC Offline Service Worker (UG-1083)
-// Handles caching of static assets and provides offline stability under network instability.
+// Handles caching of static assets and provides robust offline-first data sync stability.
 
-const CACHE_NAME = 'lomuriangole-cydc-v1';
+const CACHE_NAME = 'lomuriangole-cydc-v2';
+const API_CACHE_NAME = 'lomuriangole-cydc-api-v2';
 
 // Assets to precache on installation for instantaneous offline loading
 const PRECACHE_ASSETS = [
@@ -28,7 +29,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
+          if (cacheName !== CACHE_NAME && cacheName !== API_CACHE_NAME) {
             console.log('[Service Worker] Evicting outdated cache store:', cacheName);
             return caches.delete(cacheName);
           }
@@ -53,19 +54,126 @@ function isAssetRequest(url) {
 
 // Fetch Event Handler: Intercept network traffic
 self.addEventListener('fetch', (event) => {
-  // Only handle GET requests; POST/PUT/DELETE cannot be cached in the Cache API
+  const requestUrl = new URL(event.request.url);
+
+  // 1. Intercept /api/sync GET requests for Offline-First retrieval
+  if (event.request.method === 'GET' && requestUrl.pathname === '/api/sync') {
+    event.respondWith(
+      (async () => {
+        try {
+          const networkResponse = await fetch(event.request);
+          if (networkResponse && networkResponse.status === 200) {
+            const cache = await caches.open(API_CACHE_NAME);
+            await cache.put(new Request('/api/sync'), networkResponse.clone());
+            console.log('[Service Worker] Cached fresh GET /api/sync response');
+          }
+          return networkResponse;
+        } catch (err) {
+          console.warn('[Service Worker] GET /api/sync failed. Querying offline fallback cache...');
+          const cache = await caches.open(API_CACHE_NAME);
+          const cachedResponse = await cache.match(new Request('/api/sync'));
+          if (cachedResponse) {
+            console.log('[Service Worker] Serving GET /api/sync from offline-first cache!');
+            return cachedResponse;
+          }
+          // Return offline JSON message if cache is empty
+          return new Response(
+            JSON.stringify({
+              error: 'NetworkOffline',
+              offline: true,
+              message: 'Your cellular or satellite connection is currently unstable. Changes have been buffered locally and will be automatically synchronized upon recovery.',
+              timestamp: new Date().toISOString()
+            }),
+            {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' }
+            }
+          );
+        }
+      })()
+    );
+    return;
+  }
+
+  // 2. Intercept /api/sync POST requests to sync data locally & update fallback cache when offline
+  if (event.request.method === 'POST' && requestUrl.pathname === '/api/sync') {
+    event.respondWith(
+      (async () => {
+        const reqCloneForBody = event.request.clone();
+        try {
+          // Attempt actual network request
+          const networkResponse = await fetch(event.request);
+          if (networkResponse && networkResponse.status === 200) {
+            // Update the offline sync cache with this successful payload
+            try {
+              const bodyJson = await reqCloneForBody.json();
+              const responseToCache = new Response(JSON.stringify(bodyJson), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+              });
+              const cache = await caches.open(API_CACHE_NAME);
+              await cache.put(new Request('/api/sync'), responseToCache);
+              console.log('[Service Worker] Updated GET /api/sync cache with latest online POST payload');
+            } catch (e) {
+              console.warn('[Service Worker] Failed to cache POST payload:', e);
+            }
+          }
+          return networkResponse;
+        } catch (networkError) {
+          console.warn('[Service Worker] POST /api/sync failed (offline). Buffering locally...', networkError);
+          try {
+            const bodyJson = await reqCloneForBody.json();
+            const responseToCache = new Response(JSON.stringify(bodyJson), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' }
+            });
+            const cache = await caches.open(API_CACHE_NAME);
+            await cache.put(new Request('/api/sync'), responseToCache);
+            console.log('[Service Worker] Updated GET /api/sync cache with offline-saved POST payload');
+
+            return new Response(
+              JSON.stringify({
+                success: true,
+                offline: true,
+                message: 'Your connection is currently offline. Changes have been saved locally & buffered in the service worker.',
+                timestamp: new Date().toISOString()
+              }),
+              {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+              }
+            );
+          } catch (jsonErr) {
+            console.error('[Service Worker] Failed to parse offline POST body:', jsonErr);
+            return new Response(
+              JSON.stringify({
+                error: 'NetworkOffline',
+                offline: true,
+                message: 'You are currently offline. Changes are saved in your local browser storage.',
+                timestamp: new Date().toISOString()
+              }),
+              {
+                status: 503,
+                headers: { 'Content-Type': 'application/json' }
+              }
+            );
+          }
+        }
+      })()
+    );
+    return;
+  }
+
+  // 3. Only handle GET requests for other assets
   if (event.request.method !== 'GET') {
     return;
   }
 
-  const requestUrl = new URL(event.request.url);
-
-  // 1. Static Asset Caching - STALE-WHILE-REVALIDATE Strategy
+  // 4. Static Asset Caching - STALE-WHILE-REVALIDATE Strategy
   // Great for quick load times and instant rendering, with background updates for dynamic bundles.
   if (isAssetRequest(requestUrl) || requestUrl.pathname === '/' || requestUrl.pathname === '/index.html') {
     event.respondWith(
       caches.match(event.request).then((cachedResponse) => {
-        // Build the fetch handler to run in background or foreground
         const fetchPromise = fetch(event.request).then((networkResponse) => {
           if (networkResponse && networkResponse.status === 200) {
             const responseToCache = networkResponse.clone();
@@ -78,14 +186,14 @@ self.addEventListener('fetch', (event) => {
           console.log('[Service Worker] Background fetch failed for offline static asset:', requestUrl.pathname, err);
         });
 
-        // Return the cached version immediately if available, or fetch from network if missing.
+        // Return cached version immediately if available, otherwise fetch from network
         return cachedResponse || fetchPromise;
       })
     );
     return;
   }
 
-  // 2. Fallback Network-First for External Resources (fonts, icons, cdn scripts)
+  // 5. Fallback Network-First for External Resources (fonts, icons, CDN scripts)
   if (
     requestUrl.origin.includes('fonts.googleapis.com') ||
     requestUrl.origin.includes('fonts.gstatic.com') ||
@@ -103,27 +211,22 @@ self.addEventListener('fetch', (event) => {
           return response;
         })
         .catch(() => {
-          // fallback to cache if network is down
           return caches.match(event.request);
         })
     );
     return;
   }
 
-  // 3. API Fallbacks - Network First with offline JSON message
-  // If actual network calls to endpoints like Google sheets or Gmail fail due to instability,
-  // return a readable JSON response to the app so the UI knows there is temporary offline state.
+  // 6. Generic API Fallbacks - Network First with offline JSON message
   if (requestUrl.pathname.startsWith('/api/') || requestUrl.href.includes('googleapis.com')) {
     event.respondWith(
       fetch(event.request).catch((err) => {
-        console.warn('[Service Worker] Network request rejected due to offline state:', requestUrl.href, err);
-        
-        // Return a mock JSON response indicating network unavailability
+        console.warn('[Service Worker] Generic API fallback triggered:', requestUrl.href, err);
         return new Response(
           JSON.stringify({
             error: 'NetworkOffline',
             offline: true,
-            message: 'Your cellular or satellite connection is currently unstable. Changes have been buffered locally and will be automatically synchronized upon recovery.',
+            message: 'Your network is currently offline. Live data queries will automatically sync upon recovery.',
             timestamp: new Date().toISOString()
           }),
           {
